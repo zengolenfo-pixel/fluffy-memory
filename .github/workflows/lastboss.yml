@@ -1,4 +1,4 @@
-name: GNOME-EXIT
+          name: GNOME-EXIT
 
 on:
   workflow_dispatch:
@@ -48,19 +48,22 @@ jobs:
           echo "✅ Tailscale ready. IP: $TS_IP | Public: $PUBLIC_IP"
 
           # ================================================================
-          # 3. INSTALL GNOME DESKTOP (modern, full)
+          # 3. INSTALL GNOME DESKTOP (no pulseaudio-module-xrdp)
           # ================================================================
           echo ">>> Installing GNOME desktop (this takes ~5 minutes)..."
           sudo apt update
+          # Remove problematic package; use standard xrdp with GNOME
           sudo apt install -y ubuntu-desktop-minimal gnome-session gnome-terminal \
             gnome-control-center gnome-software gnome-shell-extension-prefs \
-            xrdp pulseaudio-module-xrdp
+            xrdp
           sudo systemctl enable xrdp
           sudo systemctl restart xrdp
 
           # Configure xrdp for GNOME
           echo "gnome-session" > ~/.xsession
           sudo sed -i 's/^exec.*/exec gnome-session/' /etc/xrdp/startwm.sh
+          # Optional: allow multiple sessions
+          sudo sed -i 's/^port=3389/port=3389/' /etc/xrdp/xrdp.ini
           echo "✅ GNOME installed and configured."
 
           # ================================================================
@@ -129,31 +132,29 @@ jobs:
           # 6i. Netdata (real‑time performance) on port 19999
           bash <(curl -Ss https://my-netdata.io/kickstart.sh) --non-interactive --dont-wait &> /dev/null
 
-          # 6j. YouTube downloader (yt-dlp) command‑line, but also web UI via a simple flask app? skip for brevity
-
           echo "✅ All extra tools installed."
 
           # ================================================================
-          # 7. FIREWALL – Only allow Tailscale subnet (allow all on loopback)
+          # 7. FIREWALL – Only allow Tailscale subnet
           # ================================================================
           echo ">>> Configuring firewall..."
           sudo ufw default deny incoming
           sudo ufw default allow outgoing
-          sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp   # RDP
-          sudo ufw allow from 100.64.0.0/10 to any port 7681 proto tcp   # web terminal
-          sudo ufw allow from 100.64.0.0/10 to any port 8080 proto tcp   # file browser
-          sudo ufw allow from 100.64.0.0/10 to any port 8081 proto tcp   # code-server
-          sudo ufw allow from 100.64.0.0/10 to any port 3128 proto tcp   # HTTP proxy
-          sudo ufw allow from 100.64.0.0/10 to any port 1080 proto tcp   # SOCKS5
-          sudo ufw allow from 100.64.0.0/10 to any port 8888 proto tcp   # Jupyter
-          sudo ufw allow from 100.64.0.0/10 to any port 8000 proto tcp   # HTTP server
-          sudo ufw allow from 100.64.0.0/10 to any port 61208 proto tcp  # Glances
-          sudo ufw allow from 100.64.0.0/10 to any port 19999 proto tcp  # Netdata
+          sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 7681 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 8080 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 8081 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 3128 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 1080 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 8888 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 8000 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 61208 proto tcp
+          sudo ufw allow from 100.64.0.0/10 to any port 19999 proto tcp
           sudo ufw --force enable
           echo "✅ Firewall configured (only Tailscale IPs)."
 
           # ================================================================
-          # 8. DISPLAY CONNECTION DETAILS (echo to logs)
+          # 8. DISPLAY CONNECTION DETAILS
           # ================================================================
           echo "=============================================="
           echo "✅✅✅ GNOME EXIT NODE IS LIVE ✅✅✅"
