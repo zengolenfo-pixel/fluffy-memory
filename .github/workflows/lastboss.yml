@@ -1,4 +1,4 @@
-          name: GNOME-EXIT
+name: GNOME-EXIT
 
 on:
   workflow_dispatch:
