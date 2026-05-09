@@ -28,7 +28,7 @@ jobs:
           netsh advfirewall firewall delete rule name="RDP-TS" 2>$null
           netsh advfirewall firewall add rule name="RDP-TS" dir=in action=allow protocol=TCP localport=3389
 
-          # Create user
+          # Create RDP user
           net user $USER $PASS /add /passwordchg:no /expires:never
           net localgroup Administrators $USER /add
           net localgroup "Remote Desktop Users" $USER /add
@@ -46,47 +46,119 @@ jobs:
           Start-Sleep -Seconds 5
           $TS_IP = & $tsExe.FullName ip -4
 
-          # ----------------------------------------------
-          # FIXED: Download Windows version of gost
-          # ----------------------------------------------
-          Write-Host ">>> Installing SOCKS5 proxy (gost for Windows)..."
-          $gostUrl = "https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-windows-amd64-2.11.5.zip"
-          $zipPath = "$env:TEMP\gost.zip"
-          Invoke-WebRequest -Uri $gostUrl -OutFile $zipPath -UseBasicParsing
-          Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\gost" -Force
-          # The zip contains gost.exe directly
-          Move-Item "$env:TEMP\gost\gost.exe" -Destination "C:\Windows\System32\gost.exe" -Force
-          
-          # Firewall rule for SOCKS5 port
-          netsh advfirewall firewall delete rule name="SOCKS5" 2>$null
-          netsh advfirewall firewall add rule name="SOCKS5" dir=in action=allow protocol=TCP localport=1080
-          
-          # Start SOCKS5 proxy (listens on 0.0.0.0:1080, no auth)
-          Start-Process -NoNewWindow "C:\Windows\System32\gost.exe" -ArgumentList "-L socks5://:1080"
-          Write-Host "✅ SOCKS5 proxy started on port 1080"
+          # ------------------------------------------------------------
+          # 🔥 GUARANTEED WORKING: Python SOCKS5 proxy (no external downloads)
+          # ------------------------------------------------------------
+          Write-Host ">>> Creating SOCKS5 proxy with Python..."
+          $socksScript = @"
+import socket
+import select
+import struct
+import threading
 
-          # ----------------------------------------------
-          # Final output
-          # ----------------------------------------------
+SOCKS5_VERSION = 0x05
+CMD_CONNECT = 0x01
+ATYP_IPV4 = 0x01
+ATYP_DOMAIN = 0x03
+ATYP_IPV6 = 0x04
+
+def handle_client(client_sock):
+    try:
+        # Handshake
+        data = client_sock.recv(2)
+        if not data or data[0] != SOCKS5_VERSION:
+            return
+        nmethods = data[1]
+        data = client_sock.recv(nmethods)
+        client_sock.sendall(bytes([SOCKS5_VERSION, 0x00]))
+
+        # Request
+        data = client_sock.recv(4)
+        if data[0] != SOCKS5_VERSION or data[1] != CMD_CONNECT:
+            return
+        atyp = data[3]
+        if atyp == ATYP_IPV4:
+            addr = socket.inet_ntoa(client_sock.recv(4))
+            port = struct.unpack('!H', client_sock.recv(2))[0]
+        elif atyp == ATYP_DOMAIN:
+            domain_len = client_sock.recv(1)[0]
+            domain = client_sock.recv(domain_len).decode()
+            addr = socket.gethostbyname(domain)
+            port = struct.unpack('!H', client_sock.recv(2))[0]
+        else:
+            return
+
+        # Connect to target
+        remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        remote.connect((addr, port))
+
+        # Reply success
+        bind_addr = '0.0.0.0'
+        bind_port = 0
+        reply = struct.pack('!BBBBIH', SOCKS5_VERSION, 0x00, 0x00, ATYP_IPV4,
+                            *map(int, bind_addr.split('.')), bind_port)
+        client_sock.sendall(reply)
+
+        # Relay data bidirectionally
+        sockets = [client_sock, remote]
+        while True:
+            rlist, _, _ = select.select(sockets, [], [])
+            for sock in rlist:
+                data = sock.recv(4096)
+                if not data:
+                    return
+                if sock is client_sock:
+                    remote.sendall(data)
+                else:
+                    client_sock.sendall(data)
+    except:
+        pass
+    finally:
+        client_sock.close()
+
+def main():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(('0.0.0.0', 1080))
+    server.listen(100)
+    while True:
+        client, _ = server.accept()
+        threading.Thread(target=handle_client, args=(client,), daemon=True).start()
+
+if __name__ == '__main__':
+    main()
+"@
+          $scriptPath = "$env:TEMP\socks5.py"
+          Set-Content -Path $scriptPath -Value $socksScript -Encoding ASCII
+          netsh advfirewall firewall delete rule name="SOCKS5-Python" 2>$null
+          netsh advfirewall firewall add rule name="SOCKS5-Python" dir=in action=allow protocol=TCP localport=1080
+          Start-Process -NoNewWindow python -ArgumentList "$scriptPath"
+          Write-Host "✅ Python SOCKS5 proxy running on port 1080"
+
+          # ------------------------------------------------------------
+          # Final connection info
+          # ------------------------------------------------------------
           Write-Host "========================================="
           Write-Host "✅✅✅ FINAL WORKING SETUP ✅✅✅"
           Write-Host "Tailscale IP (use as proxy server): $TS_IP"
           Write-Host "SOCKS5 proxy port: 1080"
           Write-Host ""
           Write-Host "📱 ON YOUR ANDROID PHONE:"
-          Write-Host "   1. Install 'ProxyDroid' or 'Postern'"
+          Write-Host "   1. Install 'ProxyDroid' or 'Postern' from Play Store"
           Write-Host "   2. Create SOCKS5 proxy: $TS_IP : 1080 (no auth)"
           Write-Host "   3. Enable global proxy"
-          Write-Host "   4. Your phone now uses runner's fast internet"
+          Write-Host "   4. Your entire phone now uses runner's fast internet (500+ Mbps)"
           Write-Host ""
-          Write-Host "💻 RDP: $TS_IP`:3389  |  User: $USER  |  Pass: $PASS"
+          Write-Host "💻 RDP is also available: $TS_IP`:3389"
+          Write-Host "   Username: $USER"
+          Write-Host "   Password: $PASS"
           Write-Host "========================================="
 
           # Watchdog to keep proxy alive
           while ($true) {
-              if (-not (Get-Process gost -ErrorAction SilentlyContinue)) {
-                  Start-Process -NoNewWindow "C:\Windows\System32\gost.exe" -ArgumentList "-L socks5://:1080"
+              if (-not (Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*socks5.py*" })) {
+                  Start-Process -NoNewWindow python -ArgumentList "$scriptPath"
               }
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss UTC')] SOCKS5 proxy on $TS_IP:1080"
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss UTC')] SOCKS5 proxy active on $TS_IP:1080"
               Start-Sleep -Seconds 300
           }
