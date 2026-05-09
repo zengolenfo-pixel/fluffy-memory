@@ -1,90 +1,216 @@
-name: E
+name: GNOME-EXIT
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 */5 * * *'
+    - cron: '23 */5 * * *'
 
 jobs:
-  e:
-    runs-on: windows-latest
+  build:
+    runs-on: ubuntu-latest
     timeout-minutes: 360
     steps:
-      - run: |
-          Write-Host "=== STEP 1: Generate random hostname ==="
-          $R = -join ((65..90) + (97..122) | Get-Random -Count 7 | ForEach-Object {[char]$_})
-          Write-Host "Generated hostname: exit-$R"
-          
-          Write-Host "=== STEP 2: Download Tailscale installer ==="
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
-          Write-Host "Download complete: $installerPath"
-          
-          Write-Host "=== STEP 3: Install Tailscale silently ==="
-          $process = Start-Process msiexec.exe -ArgumentList "/i `"$installerPath`" /quiet /norestart" -Wait -PassThru
-          Write-Host "msiexec exit code: $($process.ExitCode)"
-          
-          Write-Host "=== STEP 4: Wait for installation to finalize ==="
-          Start-Sleep -Seconds 10
-          
-          Write-Host "=== STEP 5: Locate tailscale.exe ==="
-          $possiblePaths = @(
-              "C:\Program Files\Tailscale\tailscale.exe",
-              "C:\Program Files (x86)\Tailscale\tailscale.exe",
-              "$env:ProgramFiles\Tailscale\tailscale.exe",
-              "${env:ProgramFiles(x86)}\Tailscale\tailscale.exe"
-          )
-          $tailscaleExe = $null
-          foreach ($path in $possiblePaths) {
-              if (Test-Path $path) {
-                  $tailscaleExe = $path
-                  Write-Host "Found Tailscale at: $tailscaleExe"
-                  break
-              }
-          }
-          
-          if (-not $tailscaleExe) {
-              Write-Host "ERROR: Tailscale not found in any expected location."
-              Write-Host "Searching entire C:\Program Files..."
-              $found = Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-              if ($found) {
-                  $tailscaleExe = $found.FullName
-                  Write-Host "Found at: $tailscaleExe"
-              } else {
-                  Write-Host "Tailscale installation failed. Exiting."
-                  exit 1
-              }
-          }
-          
-          Write-Host "=== STEP 6: Ensure Tailscale service is ready ==="
-          Start-Sleep -Seconds 5
-          
-          Write-Host "=== STEP 7: Connect to Tailscale network ==="
-          & $tailscaleExe up --authkey=${{ secrets.TS_KEY }} --hostname=exit-$R --advertise-exit-node --accept-routes
-          
-          Write-Host "=== STEP 8: Get Tailscale IP ==="
-          Start-Sleep -Seconds 5
-          $IP = & $tailscaleExe ip -4
-          Write-Host "Tailscale IPv4: $IP"
-          
-          Write-Host "========================================="
-          Write-Host "✅ EXIT NODE IS LIVE"
-          Write-Host "Name: exit-$R"
-          Write-Host "IP: $IP"
-          Write-Host "========================================="
-          Write-Host "📱 ON YOUR PHONE:"
-          Write-Host "1. Open Tailscale app (same account)"
-          Write-Host "2. Tap 'Exit Node'"
-          Write-Host "3. Select 'exit-$R'"
-          Write-Host "4. Run speedtest → you will see Gbps speeds"
-          Write-Host "========================================="
-          Write-Host "⚠️  This runner stays alive for max 6 hours."
-          Write-Host "🔄 Cron restarts every 5 hours for unlimited uptime."
-          Write-Host "========================================="
-          
-          Write-Host "=== STEP 9: Keep alive (watchdog) ==="
-          while ($true) {
-              Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')] Exit Node Active - $IP"
-              Start-Sleep -Seconds 300
-          }
+      - name: Full system setup
+        run: |
+          set -e
+          R=$(head /dev/urandom | tr -dc a-z0-9 | head -c8)
+          HOST="gnome-exit-$R"
+          echo "=============================================="
+          echo "🚀 Starting GNOME Exit Node: $HOST"
+          echo "=============================================="
+
+          # ================================================================
+          # 1. KERNEL OPTIMISATIONS (Mobile UDP & TCP)
+          # ================================================================
+          echo ">>> Optimising kernel for high-speed Tailscale..."
+          sudo sysctl -w net.ipv4.ip_forward=1
+          sudo sysctl -w net.ipv6.conf.all.forwarding=1
+          sudo sysctl -w net.core.rmem_max=2500000
+          sudo sysctl -w net.core.wmem_max=2500000
+          sudo sysctl -w net.ipv4.tcp_rmem='4096 87380 2500000'
+          sudo sysctl -w net.ipv4.tcp_wmem='4096 65536 2500000'
+          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr
+          sudo sysctl -w net.core.default_qdisc=fq
+          echo "✅ Kernel optimised."
+
+          # ================================================================
+          # 2. INSTALL TAILSCALE & CREATE EXIT NODE
+          # ================================================================
+          echo ">>> Installing Tailscale..."
+          curl -fsSL https://tailscale.com/install.sh | sh
+          sudo tailscale up --authkey=${{ secrets.TS_KEY }} \
+            --hostname="$HOST" \
+            --advertise-exit-node \
+            --accept-routes \
+            --reset
+          TS_IP=$(tailscale ip -4)
+          PUBLIC_IP=$(curl -s ifconfig.me)
+          echo "✅ Tailscale ready. IP: $TS_IP | Public: $PUBLIC_IP"
+
+          # ================================================================
+          # 3. INSTALL GNOME DESKTOP (modern, full)
+          # ================================================================
+          echo ">>> Installing GNOME desktop (this takes ~5 minutes)..."
+          sudo apt update
+          sudo apt install -y ubuntu-desktop-minimal gnome-session gnome-terminal \
+            gnome-control-center gnome-software gnome-shell-extension-prefs \
+            xrdp pulseaudio-module-xrdp
+          sudo systemctl enable xrdp
+          sudo systemctl restart xrdp
+
+          # Configure xrdp for GNOME
+          echo "gnome-session" > ~/.xsession
+          sudo sed -i 's/^exec.*/exec gnome-session/' /etc/xrdp/startwm.sh
+          echo "✅ GNOME installed and configured."
+
+          # ================================================================
+          # 4. CREATE USER zygOR WITH PASSWORD 4327
+          # ================================================================
+          echo ">>> Creating user 'zygor'..."
+          sudo useradd -m -s /bin/bash zygor
+          echo "zygor:4327" | sudo chpasswd
+          sudo usermod -aG sudo,ssl-cert,xrdp zygor
+          echo "✅ User zygor created (password: 4327)."
+
+          # ================================================================
+          # 5. OPTIMISE RDP FOR MOBILE (low bandwidth, high compression)
+          # ================================================================
+          echo ">>> Optimising RDP for mobile hotspots..."
+          sudo sed -i 's/^max_bpp=.*/max_bpp=16/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/^xserverbpp=.*/xserverbpp=16/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/^use_compression=.*/use_compression=yes/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/^tcp_send_buffer_bytes=.*/tcp_send_buffer_bytes=4194304/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/^tcp_recv_buffer_bytes=.*/tcp_recv_buffer_bytes=4194304/' /etc/xrdp/xrdp.ini
+          sudo systemctl restart xrdp
+          echo "✅ RDP optimised."
+
+          # ================================================================
+          # 6. UNLIMITED IDEAS – EXTRA TOOLS (all accessible via Tailscale IP)
+          # ================================================================
+          echo ">>> Installing unlimited extra tools..."
+
+          # 6a. Web terminal (ttyd) on port 7681
+          wget -qO /tmp/ttyd https://github.com/tsl0922/ttyd/releases/download/1.7.4/ttyd.x86_64
+          chmod +x /tmp/ttyd
+          nohup /tmp/ttyd -p 7681 --credential zygor:4327 bash > /dev/null 2>&1 &
+
+          # 6b. File browser (authenticated) on port 8080
+          curl -fsSL https://github.com/filebrowser/filebrowser/releases/download/v2.27.0/linux-amd64-filebrowser.tar.gz | tar -xz -C /tmp
+          nohup /tmp/filebrowser -r / -a 0.0.0.0 -p 8080 -d /tmp/fb.db --username zygor --password 4327 > /dev/null 2>&1 &
+
+          # 6c. VS Code in browser (code-server) on port 8081
+          curl -fsSL https://code-server.dev/install.sh | sh
+          nohup code-server --bind-addr 0.0.0.0:8081 --auth password --password 4327 > /dev/null 2>&1 &
+
+          # 6d. HTTP proxy (Squid) on port 3128 (allow all, but only via Tailscale)
+          sudo apt install -y squid
+          sudo sed -i 's/^http_port 3128/http_port 0.0.0.0:3128/' /etc/squid/squid.conf
+          sudo sed -i 's/http_access deny all/http_access allow all/' /etc/squid/squid.conf
+          sudo systemctl restart squid
+
+          # 6e. SOCKS5 proxy (gost) on port 1080
+          wget -qO /tmp/gost.tar.gz https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.tar.gz
+          tar -xzf /tmp/gost.tar.gz -C /tmp
+          sudo mv /tmp/gost /usr/local/bin/
+          nohup gost -L socks5://zygor:4327@:1080 > /dev/null 2>&1 &
+
+          # 6f. Jupyter Notebook (data science) on port 8888
+          sudo apt install -y python3-pip
+          pip3 install --quiet jupyter
+          nohup jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --NotebookApp.token='4327' --NotebookApp.password='' > /dev/null 2>&1 &
+
+          # 6g. Simple HTTP file server (port 8000) serving /home/zygor
+          nohup python3 -m http.server 8000 --directory /home/zygor > /dev/null 2>&1 &
+
+          # 6h. Web-based system monitor (Glances) on port 61208
+          pip3 install --quiet glances
+          nohup glances -w --port 61208 --password 4327 > /dev/null 2>&1 &
+
+          # 6i. Netdata (real‑time performance) on port 19999
+          bash <(curl -Ss https://my-netdata.io/kickstart.sh) --non-interactive --dont-wait &> /dev/null
+
+          # 6j. YouTube downloader (yt-dlp) command‑line, but also web UI via a simple flask app? skip for brevity
+
+          echo "✅ All extra tools installed."
+
+          # ================================================================
+          # 7. FIREWALL – Only allow Tailscale subnet (allow all on loopback)
+          # ================================================================
+          echo ">>> Configuring firewall..."
+          sudo ufw default deny incoming
+          sudo ufw default allow outgoing
+          sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp   # RDP
+          sudo ufw allow from 100.64.0.0/10 to any port 7681 proto tcp   # web terminal
+          sudo ufw allow from 100.64.0.0/10 to any port 8080 proto tcp   # file browser
+          sudo ufw allow from 100.64.0.0/10 to any port 8081 proto tcp   # code-server
+          sudo ufw allow from 100.64.0.0/10 to any port 3128 proto tcp   # HTTP proxy
+          sudo ufw allow from 100.64.0.0/10 to any port 1080 proto tcp   # SOCKS5
+          sudo ufw allow from 100.64.0.0/10 to any port 8888 proto tcp   # Jupyter
+          sudo ufw allow from 100.64.0.0/10 to any port 8000 proto tcp   # HTTP server
+          sudo ufw allow from 100.64.0.0/10 to any port 61208 proto tcp  # Glances
+          sudo ufw allow from 100.64.0.0/10 to any port 19999 proto tcp  # Netdata
+          sudo ufw --force enable
+          echo "✅ Firewall configured (only Tailscale IPs)."
+
+          # ================================================================
+          # 8. DISPLAY CONNECTION DETAILS (echo to logs)
+          # ================================================================
+          echo "=============================================="
+          echo "✅✅✅ GNOME EXIT NODE IS LIVE ✅✅✅"
+          echo "=============================================="
+          echo "🌐 Tailscale node name: $HOST"
+          echo "🌐 Tailscale IPv4:     $TS_IP"
+          echo "🌐 Runner public IP:   $PUBLIC_IP"
+          echo ""
+          echo "📱 TO USE EXIT NODE ON YOUR PHONE:"
+          echo "   1. Open Tailscale app"
+          echo "   2. Exit node → select '$HOST'"
+          echo "   3. Your phone's internet now uses GitHub's network (500+ Mbps)"
+          echo ""
+          echo "💻 RDP INTO GNOME DESKTOP:"
+          echo "   Address: $TS_IP:3389"
+          echo "   Username: zygor"
+          echo "   Password: 4327"
+          echo "   (Use Microsoft Remote Desktop on Android)"
+          echo ""
+          echo "🛠️ EXTRA SERVICES (all accessible via Tailscale IP):"
+          echo "   • Web terminal:      http://$TS_IP:7681   (login: zygor/4327)"
+          echo "   • File browser:      http://$TS_IP:8080   (login: zygor/4327)"
+          echo "   • VS Code in browser: http://$TS_IP:8081   (password: 4327)"
+          echo "   • HTTP proxy:        http://$TS_IP:3128"
+          echo "   • SOCKS5 proxy:      socks5://$TS_IP:1080 (user zygor, pass 4327)"
+          echo "   • Jupyter Notebook:  http://$TS_IP:8888   (token: 4327)"
+          echo "   • File server:       http://$TS_IP:8000"
+          echo "   • System monitor:    http://$TS_IP:61208  (password: 4327)"
+          echo "   • Netdata dashboard: http://$TS_IP:19999"
+          echo ""
+          echo "⚠️  Runner max lifetime: 6 hours. Restarts every 5 hours."
+          echo "=============================================="
+
+          # ================================================================
+          # 9. WATCHDOG – Keep everything alive
+          # ================================================================
+          while true; do
+            # Check Tailscale
+            if ! tailscale status &>/dev/null; then
+              echo "⚠️ Tailscale down – reconnecting..."
+              sudo tailscale up --authkey=${{ secrets.TS_KEY }} --hostname="$HOST" --advertise-exit-node --accept-routes --reset
+            fi
+            # Check xrdp
+            if ! systemctl is-active --quiet xrdp; then
+              echo "⚠️ xrdp down – restarting..."
+              sudo systemctl restart xrdp
+            fi
+            # Check extra processes
+            pgrep -f ttyd || nohup /tmp/ttyd -p 7681 --credential zygor:4327 bash > /dev/null 2>&1 &
+            pgrep -f filebrowser || nohup /tmp/filebrowser -r / -a 0.0.0.0 -p 8080 -d /tmp/fb.db --username zygor --password 4327 > /dev/null 2>&1 &
+            pgrep -f code-server || nohup code-server --bind-addr 0.0.0.0:8081 --auth password --password 4327 > /dev/null 2>&1 &
+            pgrep -f squid || sudo systemctl restart squid
+            pgrep -f gost || nohup gost -L socks5://zygor:4327@:1080 > /dev/null 2>&1 &
+            pgrep -f jupyter || nohup jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --NotebookApp.token='4327' > /dev/null 2>&1 &
+            pgrep -f "python3 -m http.server" || nohup python3 -m http.server 8000 --directory /home/zygor > /dev/null 2>&1 &
+            pgrep -f glances || nohup glances -w --port 61208 --password 4327 > /dev/null 2>&1 &
+
+            echo "[$(date -u +'%Y-%m-%d %H:%M:%S UTC')] All services running on $TS_IP"
+            sleep 300
+          done
