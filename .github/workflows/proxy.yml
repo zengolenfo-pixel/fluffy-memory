@@ -17,6 +17,7 @@ on:
 
 env:
   TS_PORT: "41641"
+  HEALTH_CHECK_INTERVAL: "180"
 
 concurrency:
   group: exit-node-windows
@@ -44,8 +45,11 @@ jobs:
         run: |
           Write-Host "[*] Installing Tailscale..."
           choco install tailscale -y --no-progress
-          # Refresh environment
+
+          # Refresh PATH so 'tailscale' can be used immediately
           $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          
+          # Verify
           Write-Host "Tailscale version:"
           tailscale version
 
@@ -53,7 +57,10 @@ jobs:
         id: ts_connect
         run: |
           Write-Host "[*] Connecting to Tailscale..."
-          $hostname = "win-" + ((Get-Date).ToUniversalTime().Ticks % 100000).ToString("X4")
+          
+          # Generate a short random hostname
+          $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | % {[char]$_}))
+          
           $mode = "${{ github.event.inputs.exit_node_mode || 'performance' }}"
           
           $args = "--accept-routes --accept-dns=true"
@@ -61,7 +68,8 @@ jobs:
             $args += " --advertise-exit-node"
           }
           
-          tailscale up --authkey=${{ secrets.TS_KEY }} --hostname=$hostname $args
+          # Use quotes around authkey to handle any special characters in the secret
+          tailscale up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname $args
           
           Start-Sleep -Seconds 20
           
@@ -89,7 +97,7 @@ jobs:
           Write-Host "╚══════════════════════════════════════╝"
           Write-Host ""
           
-          $hostname = "win-" + ((Get-Date).ToUniversalTime().Ticks % 100000).ToString("X4")
+          $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | % {[char]$_}))
           $ip = "${{ steps.ts_connect.outputs.ts_ip }}"
           $failCount = 0
           $healthCount = 0
@@ -118,7 +126,7 @@ jobs:
               Write-Host "[$timestamp] ❌ OFFLINE ($failCount/3)"
               if ($failCount -ge 3) {
                 Write-Host "[$timestamp] 🔄 Reconnecting..."
-                tailscale up --authkey=${{ secrets.TS_KEY }} --hostname=$hostname --advertise-exit-node --accept-routes --accept-dns=true
+                tailscale up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --advertise-exit-node --accept-routes --accept-dns=true
                 $failCount = 0
                 Start-Sleep -Seconds 15
               }
@@ -135,8 +143,6 @@ jobs:
             
             Start-Sleep -Seconds ${{ env.HEALTH_CHECK_INTERVAL }}
           }
-        env:
-          HEALTH_CHECK_INTERVAL: 180
 
   summary:
     needs: windows-exit-node
