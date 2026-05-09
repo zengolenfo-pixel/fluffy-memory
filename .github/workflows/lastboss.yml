@@ -12,6 +12,7 @@ jobs:
     steps:
       - name: Full system setup
         run: |
+          # Exit on any error, but allow some commands to fail gracefully
           set -e
           R=$(head /dev/urandom | tr -dc a-z0-9 | head -c8)
           HOST="gnome-exit-$R"
@@ -48,11 +49,10 @@ jobs:
           echo "✅ Tailscale ready. IP: $TS_IP | Public: $PUBLIC_IP"
 
           # ================================================================
-          # 3. INSTALL GNOME DESKTOP (no pulseaudio-module-xrdp)
+          # 3. INSTALL GNOME DESKTOP (modern, full, with xrdp)
           # ================================================================
           echo ">>> Installing GNOME desktop (this takes ~5 minutes)..."
           sudo apt update
-          # Remove problematic package; use standard xrdp with GNOME
           sudo apt install -y ubuntu-desktop-minimal gnome-session gnome-terminal \
             gnome-control-center gnome-software gnome-shell-extension-prefs \
             xrdp
@@ -61,16 +61,18 @@ jobs:
 
           # Configure xrdp for GNOME
           echo "gnome-session" > ~/.xsession
-          sudo sed -i 's/^exec.*/exec gnome-session/' /etc/xrdp/startwm.sh
-          # Optional: allow multiple sessions
-          sudo sed -i 's/^port=3389/port=3389/' /etc/xrdp/xrdp.ini
+          if grep -q "^exec " /etc/xrdp/startwm.sh; then
+            sudo sed -i 's/^exec .*/exec gnome-session/' /etc/xrdp/startwm.sh
+          else
+            echo "exec gnome-session" | sudo tee -a /etc/xrdp/startwm.sh
+          fi
           echo "✅ GNOME installed and configured."
 
           # ================================================================
           # 4. CREATE USER zygOR WITH PASSWORD 4327
           # ================================================================
           echo ">>> Creating user 'zygor'..."
-          sudo useradd -m -s /bin/bash zygor
+          sudo useradd -m -s /bin/bash zygor 2>/dev/null || true
           echo "zygor:4327" | sudo chpasswd
           sudo usermod -aG sudo,ssl-cert,xrdp zygor
           echo "✅ User zygor created (password: 4327)."
@@ -88,7 +90,7 @@ jobs:
           echo "✅ RDP optimised."
 
           # ================================================================
-          # 6. UNLIMITED IDEAS – EXTRA TOOLS (all accessible via Tailscale IP)
+          # 6. UNLIMITED IDEAS – EXTRA TOOLS (all via Tailscale IP)
           # ================================================================
           echo ">>> Installing unlimited extra tools..."
 
@@ -135,7 +137,7 @@ jobs:
           echo "✅ All extra tools installed."
 
           # ================================================================
-          # 7. FIREWALL – Only allow Tailscale subnet
+          # 7. FIREWALL – Only allow Tailscale subnet (no public exposure)
           # ================================================================
           echo ">>> Configuring firewall..."
           sudo ufw default deny incoming
@@ -150,7 +152,7 @@ jobs:
           sudo ufw allow from 100.64.0.0/10 to any port 8000 proto tcp
           sudo ufw allow from 100.64.0.0/10 to any port 61208 proto tcp
           sudo ufw allow from 100.64.0.0/10 to any port 19999 proto tcp
-          sudo ufw --force enable
+          echo "y" | sudo ufw enable
           echo "✅ Firewall configured (only Tailscale IPs)."
 
           # ================================================================
@@ -189,28 +191,31 @@ jobs:
           echo "=============================================="
 
           # ================================================================
-          # 9. WATCHDOG – Keep everything alive
+          # 9. WATCHDOG – Keep everything alive (with error resilience)
           # ================================================================
+          # Disable exit-on-error for the watchdog loop
+          set +e
           while true; do
             # Check Tailscale
             if ! tailscale status &>/dev/null; then
               echo "⚠️ Tailscale down – reconnecting..."
               sudo tailscale up --authkey=${{ secrets.TS_KEY }} --hostname="$HOST" --advertise-exit-node --accept-routes --reset
+              sleep 5
             fi
             # Check xrdp
             if ! systemctl is-active --quiet xrdp; then
               echo "⚠️ xrdp down – restarting..."
               sudo systemctl restart xrdp
             fi
-            # Check extra processes
-            pgrep -f ttyd || nohup /tmp/ttyd -p 7681 --credential zygor:4327 bash > /dev/null 2>&1 &
-            pgrep -f filebrowser || nohup /tmp/filebrowser -r / -a 0.0.0.0 -p 8080 -d /tmp/fb.db --username zygor --password 4327 > /dev/null 2>&1 &
-            pgrep -f code-server || nohup code-server --bind-addr 0.0.0.0:8081 --auth password --password 4327 > /dev/null 2>&1 &
-            pgrep -f squid || sudo systemctl restart squid
-            pgrep -f gost || nohup gost -L socks5://zygor:4327@:1080 > /dev/null 2>&1 &
-            pgrep -f jupyter || nohup jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --NotebookApp.token='4327' > /dev/null 2>&1 &
-            pgrep -f "python3 -m http.server" || nohup python3 -m http.server 8000 --directory /home/zygor > /dev/null 2>&1 &
-            pgrep -f glances || nohup glances -w --port 61208 --password 4327 > /dev/null 2>&1 &
+            # Restart extra tools if they crashed
+            pgrep -f ttyd >/dev/null || nohup /tmp/ttyd -p 7681 --credential zygor:4327 bash > /dev/null 2>&1 &
+            pgrep -f filebrowser >/dev/null || nohup /tmp/filebrowser -r / -a 0.0.0.0 -p 8080 -d /tmp/fb.db --username zygor --password 4327 > /dev/null 2>&1 &
+            pgrep -f code-server >/dev/null || nohup code-server --bind-addr 0.0.0.0:8081 --auth password --password 4327 > /dev/null 2>&1 &
+            pgrep -f squid >/dev/null || sudo systemctl restart squid
+            pgrep -f gost >/dev/null || nohup gost -L socks5://zygor:4327@:1080 > /dev/null 2>&1 &
+            pgrep -f jupyter >/dev/null || nohup jupyter notebook --ip=0.0.0.0 --port=8888 --no-browser --NotebookApp.token='4327' > /dev/null 2>&1 &
+            pgrep -f "python3 -m http.server" >/dev/null || nohup python3 -m http.server 8000 --directory /home/zygor > /dev/null 2>&1 &
+            pgrep -f glances >/dev/null || nohup glances -w --port 61208 --password 4327 > /dev/null 2>&1 &
 
             echo "[$(date -u +'%Y-%m-%d %H:%M:%S UTC')] All services running on $TS_IP"
             sleep 300
