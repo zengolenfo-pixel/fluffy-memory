@@ -26,20 +26,16 @@ on:
 
   schedule:
     - cron: '5 */4 * * *'
-    - cron: '0 0 * * 0'
+
+concurrency:
+  group: exit-node-production-mac
+  cancel-in-progress: false
 
 env:
   TAILSCALE_VERSION: "1.84.0"
   RDP_PORT: "3389"
   HEALTH_CHECK_INTERVAL: "180"
-  DATACENTER_MODE: "true"
-  TS_STATE_DIR: "/var/lib/tailscale"
-  TS_SOCKET: "/var/run/tailscale/tailscaled.sock"
   TS_PORT: "41641"
-
-concurrency:
-  group: exit-node-production-mac
-  cancel-in-progress: false
 
 jobs:
   exit-node-mac-perfect:
@@ -53,527 +49,162 @@ jobs:
 
     steps:
       - name: System information and validation
-        id: system_info
         run: |
-          echo ""
-          echo "╔════════════════════════════════════════════════════════════╗"
-          echo "║   BULLETPROOF macOS RDP EXIT NODE - PERFECT v4.0          ║"
-          echo "╚════════════════════════════════════════════════════════════╝"
-          echo ""
-          
           echo "[*] SYSTEM INFORMATION"
-          
-          echo "  ✓ OS: $(sw_vers -productName) $(sw_vers -productVersion)"
-          echo "  ✓ Build: $(sw_vers -buildVersion)"
-          
-          PROCESSOR=$(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "Apple Silicon")
-          CORES=$(sysctl -n hw.ncpu 2>/dev/null || echo "Unknown")
-          echo "  ✓ CPU: $PROCESSOR | Cores: $CORES"
-          
-          TOTAL_MEM=$(sysctl -n hw.memsize 2>/dev/null)
-          if [ -n "$TOTAL_MEM" ]; then
-            TOTAL_MEM_GB=$((TOTAL_MEM / 1024 / 1024 / 1024))
-            echo "  ✓ RAM: ${TOTAL_MEM_GB}GB"
-          else
-            echo "  ✓ RAM: Information not available"
-          fi
-          
-          DISK_INFO=$(df -h / | awk 'NR==2 {print $2, $4}')
-          echo "  ✓ Disk: $DISK_INFO"
-          
-          if [[ $EUID -ne 0 ]]; then
-            echo "  ⚠ Running as: $(whoami) (non-root)"
-            echo "  ℹ May require 'sudo' for some operations"
-          else
-            echo "  ✓ Admin: Root privileges confirmed"
-          fi
-          
-          echo ""
-          echo "[*] ENVIRONMENT VALIDATION"
-          echo "  ✓ GitHub Actions Runner: macOS"
-          echo "  ✓ Architecture: $(uname -m)"
-          echo "  ✓ Kernel: $(uname -r)"
-          echo "  ✓ Hostname: $(hostname)"
-          echo ""
-          
-          echo "[*] REQUIRED TOOLS CHECK"
-          for tool in curl wget brew networksetup ifconfig sysctl sw_vers md5; do
-            if command -v $tool &> /dev/null; then
-              echo "  ✓ $tool: AVAILABLE"
-            else
-              echo "  ⚠ $tool: NOT FOUND"
-            fi
-          done
+          echo "  OS: $(sw_vers -productName) $(sw_vers -productVersion)"
+          echo "  CPU: $(sysctl -n machdep.cpu.brand_string 2>/dev/null || echo 'Apple Silicon')"
+          echo "  Cores: $(sysctl -n hw.ncpu 2>/dev/null || echo 'N/A')"
+          echo "  RAM: $(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 / 1024 / 1024 ))GB"
+          echo "  Disk: $(df -h / | awk 'NR==2 {print $2 " total, " $4 " free"}')"
+          echo "  Runner: $(whoami) on $(hostname)"
 
       - name: Enterprise credential generation
         id: credentials
         run: |
-          echo ""
           echo "[*] ENTERPRISE CREDENTIAL GENERATION"
           
-          # Fixed: Use md5 directly (macOS command)
-          RANDOM_SUFFIX=$(date +%s | md5 | head -c 8)
-          HOSTNAME="mac-${RANDOM_SUFFIX}"
+          # Generate random hostname using date and process ID (no /dev/urandom needed)
+          HOSTNAME="mac-$(date +%s | md5 | cut -c1-8)"
           
-          # Generate RDP credentials with timeout to prevent hanging
-          RDP_USER=$(LC_ALL=C tr -dc 'a-z' < /dev/urandom | head -c 12)
-          RDP_PASS=$(LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*' < /dev/urandom | head -c 20)
+          # Generate random username using base64 encoded random data
+          RDP_USER="user$(date +%s | sha256sum | base64 | tr -dc 'a-z' | cut -c1-10)"
+          [ -z "$RDP_USER" ] && RDP_USER="user$(echo $RANDOM$RANDOM | md5 | cut -c1-8)"
           
-          echo "  ✓ Hostname: $HOSTNAME"
-          echo "  ✓ RDP User: $RDP_USER"
-          echo "  ✓ RDP Pass: Enterprise-grade (${#RDP_PASS} chars)"
+          # Generate random password using multiple sources
+          RDP_PASS="P$(date +%s)$(hostname)$(echo $RANDOM$RANDOM)!" | md5 | base64 | tr -dc 'A-Za-z0-9!@#$%^&*' | cut -c1-20
+          [ -z "$RDP_PASS" ] && RDP_PASS="Pass$(date +%s | md5 | cut -c1-16)!"
           
-          # Output to GitHub environment
+          echo "  Hostname: $HOSTNAME"
+          echo "  RDP User: $RDP_USER"
+          echo "  RDP Pass: $(echo $RDP_PASS | cut -c1-5)... (${#RDP_PASS} chars)"
+          
+          # Use a delimiter to prevent masking issues
           echo "hostname=$HOSTNAME" >> $GITHUB_OUTPUT
           echo "username=$RDP_USER" >> $GITHUB_OUTPUT
-          echo "password=$RDP_PASS" >> $GITHUB_OUTPUT
+          echo "password<<EOF" >> $GITHUB_OUTPUT
+          echo "$RDP_PASS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Install Tailscale
+      - name: Install and start Tailscale
         id: ts_install
         run: |
-          echo ""
           echo "[*] TAILSCALE INSTALLATION"
           
-          TS_VERSION="${{ env.TAILSCALE_VERSION }}"
-          
-          echo "  [+] Checking if Tailscale is installed..."
-          
-          if command -v tailscale &> /dev/null; then
-            echo "  ✓ Tailscale already installed"
-            CURRENT_TS_VERSION=$(tailscale version 2>/dev/null | head -n 1 || echo "unknown")
-            echo "  ✓ Version: $CURRENT_TS_VERSION"
-            
-            if command -v tailscaled &> /dev/null; then
-              echo "  ✓ Tailscale daemon: AVAILABLE"
-            else
-              echo "  ⚠ Tailscale daemon: NOT FOUND (will use tailscale binary)"
-            fi
-          else
-            echo "  [+] Installing Tailscale v$TS_VERSION..."
-            
-            MAX_RETRIES=5
-            RETRY=0
-            
-            while [ $RETRY -lt $MAX_RETRIES ]; do
-              if brew install tailscale 2>/dev/null; then
-                echo "  ✓ Tailscale installed via Homebrew"
-                break
-              else
-                RETRY=$((RETRY + 1))
-                if [ $RETRY -lt $MAX_RETRIES ]; then
-                  echo "  ~ Install attempt $RETRY failed, retrying in 5s..."
-                  sleep 5
-                else
-                  echo "  ! Homebrew install failed, trying direct download..."
-                  
-                  TS_PKG="tailscale_${TS_VERSION}_darwin_universal.pkg"
-                  TS_DOWNLOAD_URL="https://pkgs.tailscale.com/stable/${TS_PKG}"
-                  
-                  echo "  [+] Downloading from: $TS_DOWNLOAD_URL"
-                  
-                  if curl -fsSL "$TS_DOWNLOAD_URL" -o "/tmp/${TS_PKG}"; then
-                    echo "  ✓ Download successful"
-                    
-                    if [ -f "/tmp/${TS_PKG}" ]; then
-                      echo "  [+] Installing PKG..."
-                      sudo installer -pkg "/tmp/${TS_PKG}" -target /
-                      echo "  ✓ Tailscale installed from PKG"
-                    fi
-                  else
-                    echo "  ❌ Failed to download Tailscale"
-                    exit 1
-                  fi
-                fi
-              fi
-            done
+          # Install Tailscale if needed
+          if ! command -v tailscale &> /dev/null; then
+            echo "Installing Tailscale..."
+            curl -fsSL https://tailscale.com/install.sh | sh
           fi
           
-          # Verify installation
-          TAILSCALE_BIN=$(which tailscale 2>/dev/null)
-          TAILSCALED_BIN=$(which tailscaled 2>/dev/null)
+          TAILSCALE_BIN="/usr/local/bin/tailscale"
+          [ ! -f "$TAILSCALE_BIN" ] && TAILSCALE_BIN="/opt/homebrew/bin/tailscale"
+          [ ! -f "$TAILSCALE_BIN" ] && TAILSCALE_BIN=$(which tailscale)
           
-          if [ -z "$TAILSCALE_BIN" ]; then
-            echo "  ❌ Tailscale binary not found"
-            exit 1
-          fi
-          
-          echo "  ✓ Tailscale binary: $TAILSCALE_BIN"
-          
-          if [ -z "$TAILSCALED_BIN" ]; then
-            echo "  ⚠ Tailscale daemon binary not found, tailscale will handle daemon"
-            TAILSCALED_BIN="$TAILSCALE_BIN"
-          else
-            echo "  ✓ Tailscale daemon: $TAILSCALED_BIN"
-          fi
-          
+          echo "Tailscale binary: $TAILSCALE_BIN"
           echo "ts_path=$TAILSCALE_BIN" >> $GITHUB_OUTPUT
-          echo "ts_daemon_path=$TAILSCALED_BIN" >> $GITHUB_OUTPUT
           
-          # Create necessary directories
-          sudo mkdir -p /var/lib/tailscale 2>/dev/null || true
-          sudo mkdir -p /var/run/tailscale 2>/dev/null || true
-          sudo chmod 755 /var/lib/tailscale 2>/dev/null || true
-          sudo chmod 755 /var/run/tailscale 2>/dev/null || true
-
-      - name: Network configuration for macOS
-        run: |
-          echo ""
-          echo "[*] NETWORK CONFIGURATION"
+          # Start Tailscale daemon
+          echo "[*] Starting Tailscale daemon..."
+          sudo $TAILSCALE_BIN up --operator=$USER --accept-routes --accept-dns=true 2>/dev/null || true
           
-          echo "  [+] Optimizing network stack..."
-          
-          # Network optimizations for macOS (best effort)
-          sudo sysctl -w net.inet.tcp.delayed_ack=0 2>/dev/null || true
-          sudo sysctl -w net.inet.tcp.mssdflt=1440 2>/dev/null || true
-          sudo sysctl -w net.inet.tcp.recvspace=65536 2>/dev/null || true
-          sudo sysctl -w net.inet.tcp.sendspace=65536 2>/dev/null || true
-          echo "  ✓ TCP parameters optimized"
-          
-          echo "  [+] Testing connectivity..."
-          if ping -c 3 -t 5 8.8.8.8 &> /dev/null; then
-            echo "  ✓ Internet connectivity: ONLINE"
-          else
-            echo "  ! Internet connectivity: OFFLINE (proceeding)"
-          fi
-          
-          echo "  [+] Network interfaces:"
-          ifconfig | grep "inet " | awk '{print "    " $2}' 2>/dev/null || echo "    No interfaces found"
-          
-          echo "  [+] DNS servers:"
-          cat /etc/resolv.conf 2>/dev/null | grep nameserver | awk '{print "    " $2}' || echo "    (using system default)"
-          
-          echo "  [+] Default route:"
-          netstat -rn -f inet | grep default | awk '{print "    Gateway:", $2, "Interface:", $6}' 2>/dev/null || true
+          # Wait for daemon
+          for i in $(seq 1 30); do
+            if $TAILSCALE_BIN status &>/dev/null; then
+              echo "Daemon ready"
+              break
+            fi
+            sleep 2
+          done
 
       - name: Tailscale connection
         id: ts_connect
-        timeout-minutes: 10
+        timeout-minutes: 5
         run: |
           TAILSCALE_BIN="${{ steps.ts_install.outputs.ts_path }}"
-          TAILSCALED_BIN="${{ steps.ts_install.outputs.ts_daemon_path }}"
           HOSTNAME="${{ steps.credentials.outputs.hostname }}"
           TS_KEY="${{ secrets.TS_KEY }}"
-          MODE="${{ github.event.inputs.exit_node_mode || 'performance' }}"
           
-          echo ""
-          echo "[*] TAILSCALE CONNECTION (MODE: $MODE)"
+          echo "[*] TAILSCALE CONNECTION"
           
-          echo "  [+] Cleaning up any existing Tailscale processes..."
-          sudo pkill -9 -f tailscaled 2>/dev/null || true
-          sudo pkill -9 -f tailscale 2>/dev/null || true
-          sleep 3
+          # Connect to Tailscale
+          $TAILSCALE_BIN up \
+            --authkey=$TS_KEY \
+            --hostname=$HOSTNAME \
+            --advertise-exit-node \
+            --accept-routes \
+            --accept-dns=true || exit 1
           
-          # Remove stale socket files
-          sudo rm -f /var/run/tailscale/tailscaled.sock 2>/dev/null || true
-          sudo rm -f /var/run/tailscale/tailscale.sock 2>/dev/null || true
-          
-          echo "  [+] Starting Tailscale daemon..."
-          
-          # Start tailscaled with proper parameters
-          # Timeout the daemon startup
-          timeout 120 sudo $TAILSCALED_BIN \
-            --state=/var/lib/tailscale/tailscaled.state \
-            --socket=/var/run/tailscale/tailscaled.sock \
-            --port=${{ env.TS_PORT }} \
-            > /tmp/tailscaled.log 2>&1 &
-          
-          TAILSCALED_PID=$!
-          echo "  ✓ Tailscale daemon started (PID: $TAILSCALED_PID)"
-          
-          # Wait for daemon to initialize
-          echo "  [+] Waiting for daemon to initialize..."
-          DAEMON_READY=false
-          
-          for i in {1..30}; do
-            if sudo $TAILSCALE_BIN --socket=/var/run/tailscale/tailscaled.sock status &>/dev/null; then
-              echo "  ✓ Tailscale daemon: READY"
-              DAEMON_READY=true
-              break
-            fi
-            
-            # Check if process is still running
-            if ! kill -0 $TAILSCALED_PID 2>/dev/null; then
-              echo "  ⚠ Daemon process died, checking logs..."
-              cat /tmp/tailscaled.log 2>/dev/null || true
-              
-              echo "  [+] Restarting daemon..."
-              sudo $TAILSCALED_BIN \
-                --state=/var/lib/tailscale/tailscaled.state \
-                --socket=/var/run/tailscale/tailscaled.sock \
-                --port=${{ env.TS_PORT }} \
-                > /tmp/tailscaled_restart.log 2>&1 &
-              
-              TAILSCALED_PID=$!
-              sleep 5
-            fi
-            
-            sleep 2
-            if [ $((i % 5)) -eq 0 ]; then
-              echo "  ~ Waiting... ($i/30)"
-            fi
-          done
-          
-          if [ "$DAEMON_READY" = false ]; then
-            echo "  ❌ Tailscale daemon failed to start after 30 attempts"
-            echo "  Daemon logs:"
-            cat /tmp/tailscaled.log 2>/dev/null || true
-            exit 1
-          fi
-          
-          echo "  [+] Connecting to Tailscale network..."
-          
-          # Build connection arguments
-          CONNECT_ARGS="--accept-routes --accept-dns=true"
-          
-          case "$MODE" in
-            "performance"|"smooth")
-              CONNECT_ARGS="$CONNECT_ARGS --advertise-exit-node"
-              echo "  Mode: $MODE (Exit Node)"
-              ;;
-            "balanced")
-              CONNECT_ARGS="$CONNECT_ARGS --advertise-routes=0.0.0.0/0"
-              echo "  Mode: BALANCED (Subnet Router)"
-              ;;
-            "relay-only")
-              echo "  Mode: RELAY-ONLY"
-              ;;
-          esac
-          
-          CONN_RETRY=0
-          MAX_CONN_RETRIES=5
-          
-          while [ $CONN_RETRY -lt $MAX_CONN_RETRIES ]; do
-            echo "  [+] Connection attempt $((CONN_RETRY + 1))..."
-            
-            if sudo $TAILSCALE_BIN \
-              --socket=/var/run/tailscale/tailscaled.sock \
-              up \
-              --authkey=$TS_KEY \
-              --hostname=$HOSTNAME \
-              $CONNECT_ARGS 2>&1 | tee /tmp/tailscale_up.log; then
-              
-              echo "  ✓ Connected to Tailscale successfully"
-              break
-            else
-              CONN_RETRY=$((CONN_RETRY + 1))
-              
-              if [ $CONN_RETRY -lt $MAX_CONN_RETRIES ]; then
-                echo "  ~ Retrying in 10 seconds..."
-                sleep 10
-              else
-                echo "  ❌ Failed to connect to Tailscale after $MAX_CONN_RETRIES attempts"
-                echo "  Final daemon logs:"
-                cat /tmp/tailscaled.log 2>/dev/null || true
-                exit 1
-              fi
-            fi
-          done
-          
-          # Wait for stable connection
-          echo "  [+] Waiting for stable connection..."
+          # Get IP
           sleep 15
-          
-          echo "  [+] Retrieving Tailscale IP..."
-          
-          IP_RETRY=0
           TS_IP=""
-          
-          while [ $IP_RETRY -lt 15 ]; do
-            TS_IP=$(sudo $TAILSCALE_BIN --socket=/var/run/tailscale/tailscaled.sock ip -4 2>/dev/null)
-            
-            if [[ $TS_IP == 100.* ]]; then
-              echo "  ✓ Tailscale IP obtained: $TS_IP"
-              break
-            fi
-            
-            IP_RETRY=$((IP_RETRY + 1))
+          for i in $(seq 1 10); do
+            TS_IP=$($TAILSCALE_BIN ip -4 2>/dev/null)
+            [[ $TS_IP == 100.* ]] && break
             sleep 3
           done
           
-          if [[ -z "$TS_IP" ]] || [[ ! $TS_IP == 100.* ]]; then
-            echo "  ❌ Could not obtain valid Tailscale IP"
-            echo "  Final status:"
-            sudo $TAILSCALE_BIN --socket=/var/run/tailscale/tailscaled.sock status 2>&1 || true
+          if [[ ! $TS_IP == 100.* ]]; then
+            echo "Failed to get Tailscale IP"
+            $TAILSCALE_BIN status
             exit 1
           fi
           
-          echo "  ✓ Final IP: $TS_IP"
+          echo "Tailscale IP: $TS_IP"
           echo "ts_ip=$TS_IP" >> $GITHUB_OUTPUT
 
-      - name: macOS firewall configuration
-        if: success()
-        run: |
-          echo ""
-          echo "[*] macOS FIREWALL CONFIGURATION"
-          
-          echo "  [+] Checking firewall status..."
-          
-          if sudo defaults read /Library/Preferences/com.apple.alf globalstate &> /dev/null; then
-            FIREWALL_STATUS=$(sudo defaults read /Library/Preferences/com.apple.alf globalstate)
-            if [ "$FIREWALL_STATUS" -eq 1 ]; then
-              echo "  ✓ macOS Firewall: ENABLED"
-            else
-              echo "  ℹ macOS Firewall: DISABLED"
-              echo "  [+] Enabling firewall..."
-              sudo defaults write /Library/Preferences/com.apple.alf globalstate -int 1
-              echo "  ✓ Firewall enabled"
-            fi
-          fi
-          
-          echo "  [+] Firewall rules configured:"
-          echo "  ✓ RDP port (3389): Allow from Tailscale network"
-          echo "  ✓ Tailscale VPN: Allow all traffic"
-          echo "  ✓ Outbound HTTPS (443): Allow"
-          echo "  ✓ Outbound DNS (53): Allow"
-          echo "  ✓ Tailscale port (41641): Allow"
-
-      - name: RDP verification for macOS
+      - name: RDP verification
         id: rdp_verification
-        if: success()
         run: |
-          echo ""
-          echo "[*] RDP VERIFICATION"
+          echo "[*] VERIFICATION"
           
           TAILSCALE_BIN="${{ steps.ts_install.outputs.ts_path }}"
+          $TAILSCALE_BIN status
           
-          echo "  [+] Verifying Tailscale connection..."
-          
-          TS_STATUS=$(sudo $TAILSCALE_BIN --socket=/var/run/tailscale/tailscaled.sock status 2>&1)
-          
-          if echo "$TS_STATUS" | grep -q "Tailscale is stopped"; then
-            echo "  ❌ Tailscale is stopped"
-            exit 1
-          elif echo "$TS_STATUS" | grep -q "logged in"; then
-            echo "  ✓ Tailscale: LOGGED IN"
-          else
-            echo "  ⚠ Tailscale status: $(echo "$TS_STATUS" | head -1)"
-          fi
-          
-          TS_IP=$(sudo $TAILSCALE_BIN --socket=/var/run/tailscale/tailscaled.sock ip -4 2>/dev/null)
-          if [[ $TS_IP == 100.* ]]; then
-            echo "  ✓ Tailscale IP: $TS_IP"
-          else
-            echo "  ❌ Tailscale IP invalid: $TS_IP"
-            exit 1
-          fi
-          
-          echo "  [+] Network status:"
-          echo "    Active interfaces:"
-          ifconfig | grep "inet " | awk '{print "      " $2}'
-          
-          echo "  ✓ All verifications passed"
           echo "rdp_status=operational" >> $GITHUB_OUTPUT
 
       - name: 24/7 monitoring
-        if: success()
         run: |
           TAILSCALE_BIN="${{ steps.ts_install.outputs.ts_path }}"
-          TAILSCALED_BIN="${{ steps.ts_install.outputs.ts_daemon_path }}"
           HOSTNAME="${{ steps.credentials.outputs.hostname }}"
           TS_KEY="${{ secrets.TS_KEY }}"
           TS_IP="${{ steps.ts_connect.outputs.ts_ip }}"
-          RDP_USER="${{ steps.credentials.outputs.username }}"
           
-          echo ""
-          echo "╔════════════════════════════════════════════════════════════╗"
-          echo "║  EXIT NODE OPERATIONAL - 24/7 MONITORING ACTIVE (macOS)   ║"
-          echo "╚════════════════════════════════════════════════════════════╝"
-          echo ""
-          
-          echo "Hostname:      $HOSTNAME"
-          echo "IP:            $TS_IP"
-          echo "RDP User:      $RDP_USER"
-          echo "Status:        READY"
-          echo "Platform:      macOS"
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║  EXIT NODE OPERATIONAL (macOS)                      ║"
+          echo "╚══════════════════════════════════════════════════════╝"
+          echo "Hostname: $HOSTNAME | IP: $TS_IP"
           echo ""
           
-          FAIL_COUNT=0
-          HEALTH_COUNT=0
-          RECOVERY_COUNT=0
           START_TIME=$(date +%s)
+          HEALTH_COUNT=0
+          FAIL_COUNT=0
           
           while true; do
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$((CURRENT_TIME - START_TIME))
-            HOURS=$((ELAPSED / 3600))
-            MINUTES=$(((ELAPSED % 3600) / 60))
-            SECONDS=$((ELAPSED % 60))
-            UPTIME=$(printf "%02dh %02dm %02ds" $HOURS $MINUTES $SECONDS)
+            ELAPSED=$(($(date +%s) - START_TIME))
             
-            # Check daemon process
-            if pgrep -f tailscaled >/dev/null 2>&1; then
-              # Check Tailscale status
-              if sudo $TAILSCALE_BIN --socket=/var/run/tailscale/tailscaled.sock status 2>&1 | grep -q "logged in"; then
-                TS_CHECK=$(sudo $TAILSCALE_BIN --socket=/var/run/tailscale/tailscaled.sock ip -4 2>/dev/null)
-                
-                if [[ $TS_CHECK == 100.* ]]; then
-                  FAIL_COUNT=0
-                  HEALTH_COUNT=$((HEALTH_COUNT + 1))
-                  TIMESTAMP=$(date '+%H:%M:%S')
-                  echo "[$TIMESTAMP] ✅ Health OK | IP: $TS_CHECK | Uptime: $UPTIME | Checks: $HEALTH_COUNT"
-                else
-                  FAIL_COUNT=$((FAIL_COUNT + 1))
-                  TIMESTAMP=$(date '+%H:%M:%S')
-                  echo "[$TIMESTAMP] ⚠ Invalid IP | Fail count: $FAIL_COUNT/3"
-                fi
-              else
-                FAIL_COUNT=$((FAIL_COUNT + 1))
-                TIMESTAMP=$(date '+%H:%M:%S')
-                echo "[$TIMESTAMP] ⚠ Not logged in | Fail count: $FAIL_COUNT/3"
+            if $TAILSCALE_BIN status | grep -q "offline\|stopped"; then
+              FAIL_COUNT=$((FAIL_COUNT + 1))
+              echo "[$(date +%H:%M:%S)] ⚠ Connection issue ($FAIL_COUNT/3)"
+              
+              if [ $FAIL_COUNT -ge 3 ]; then
+                echo "[$(date +%H:%M:%S)] 🔄 Reconnecting..."
+                $TAILSCALE_BIN up \
+                  --authkey=$TS_KEY \
+                  --hostname=$HOSTNAME \
+                  --advertise-exit-node \
+                  --accept-routes \
+                  --accept-dns=true 2>&1
+                FAIL_COUNT=0
+                sleep 15
               fi
             else
-              FAIL_COUNT=$((FAIL_COUNT + 1))
-              TIMESTAMP=$(date '+%H:%M:%S')
-              echo "[$TIMESTAMP] ❌ Daemon not running | Fail count: $FAIL_COUNT/3"
-            fi
-            
-            # Auto-recovery
-            if [ $FAIL_COUNT -ge 3 ]; then
-              TIMESTAMP=$(date '+%H:%M:%S')
-              echo "[$TIMESTAMP] 🔄 Auto-recovery initiated..."
-              RECOVERY_COUNT=$((RECOVERY_COUNT + 1))
-              
-              sudo pkill -9 -f tailscaled 2>/dev/null || true
-              sudo pkill -9 -f tailscale 2>/dev/null || true
-              sleep 5
-              
-              sudo rm -f /var/run/tailscale/tailscaled.sock 2>/dev/null || true
-              
-              sudo $TAILSCALED_BIN \
-                --state=/var/lib/tailscale/tailscaled.state \
-                --socket=/var/run/tailscale/tailscaled.sock \
-                --port=${{ env.TS_PORT }} \
-                > /tmp/tailscaled_recovery.log 2>&1 &
-              
-              sleep 10
-              
-              sudo $TAILSCALE_BIN \
-                --socket=/var/run/tailscale/tailscaled.sock \
-                up \
-                --authkey=$TS_KEY \
-                --hostname=$HOSTNAME \
-                --advertise-exit-node \
-                --accept-routes \
-                --accept-dns=true 2>&1 || true
-              
               FAIL_COUNT=0
-              sleep 15
-              echo "[$TIMESTAMP] ✓ Recovery complete"
+              HEALTH_COUNT=$((HEALTH_COUNT + 1))
+              echo "[$(date +%H:%M:%S)] ✅ Health OK | Uptime: $((ELAPSED/3600))h$(((ELAPSED%3600)/60))m | Checks: $HEALTH_COUNT"
             fi
             
-            # Timeout check
-            if [ $ELAPSED -ge 350 ]; then
-              echo ""
-              echo "╔════════════════════════════════════════════════════════════╗"
-              echo "║            APPROACHING TIMEOUT - GRACEFUL EXIT             ║"
-              echo "╚════════════════════════════════════════════════════════════╝"
-              echo ""
-              echo "Session Statistics:"
-              echo "  Total Uptime:       $UPTIME"
-              echo "  Health Checks:      $HEALTH_COUNT"
-              echo "  Auto-Recoveries:    $RECOVERY_COUNT"
-              break
-            fi
+            # Exit before timeout (350 minutes)
+            [ $ELAPSED -ge 21000 ] && break
             
             sleep ${{ env.HEALTH_CHECK_INTERVAL }}
           done
@@ -583,68 +214,17 @@ jobs:
     if: always()
     runs-on: macos-latest
     steps:
-      - name: Deployment summary
+      - name: Summary
         run: |
-          echo ""
-          echo "╔════════════════════════════════════════════════════════════╗"
-          echo "║   BULLETPROOF EXIT NODE (macOS) - DEPLOYMENT SUMMARY v4.0  ║"
-          echo "╚════════════════════════════════════════════════════════════╝"
-          echo ""
+          RESULT="${{ needs.exit-node-mac-perfect.result }}"
+          IP="${{ needs.exit-node-mac-perfect.outputs.exit_node_ip }}"
+          NAME="${{ needs.exit-node-mac-perfect.outputs.exit_node_name }}"
           
-          JOB_RESULT="${{ needs.exit-node-mac-perfect.result }}"
-          EXIT_IP="${{ needs.exit-node-mac-perfect.outputs.exit_node_ip }}"
-          EXIT_NAME="${{ needs.exit-node-mac-perfect.outputs.exit_node_name }}"
-          RDP_STATUS="${{ needs.exit-node-mac-perfect.outputs.rdp_status }}"
-          
-          if [ "$JOB_RESULT" = "success" ]; then
-            echo "✅ DEPLOYMENT: SUCCESS"
-            echo ""
-            
-            if [ -n "$EXIT_IP" ]; then
-              echo "╔════════════════════════════════════════════════════════════╗"
-              echo "║                   EXIT NODE DETAILS                        ║"
-              echo "╚════════════════════════════════════════════════════════════╝"
-              echo ""
-              echo "  Exit Node Name:    $EXIT_NAME"
-              echo "  Tailscale IP:      $EXIT_IP"
-              echo "  RDP Status:        $RDP_STATUS"
-              echo ""
-              
-              echo "╔════════════════════════════════════════════════════════════╗"
-              echo "║              MULTI-DEVICE CONNECTION GUIDE                 ║"
-              echo "╚════════════════════════════════════════════════════════════╝"
-              echo ""
-              echo "  All devices:"
-              echo "    1. Install Tailscale from https://tailscale.com/download"
-              echo "    2. Login to your Tailscale account"
-              echo "    3. Use exit node: $EXIT_NAME ($EXIT_IP)"
-              echo ""
-              echo "  RDP Connection:"
-              echo "    - Address: $EXIT_IP"
-              echo "    - Port: 3389"
-              echo "    - User: (generated credentials)"
-              echo ""
-            fi
-            
-            echo "╔════════════════════════════════════════════════════════════╗"
-            echo "║                   ACTIVE FEATURES                          ║"
-            echo "╚════════════════════════════════════════════════════════════╝"
-            echo ""
-            echo "  ✓ macOS optimized codebase"
-            echo "  ✓ Tailscale VPN overlay"
-            echo "  ✓ 24/7 monitoring & auto-recovery"
-            echo "  ✓ Multi-device support"
-            echo "  ✓ Enterprise credentials"
-            echo "  ✓ Firewall integration"
-            echo ""
+          if [ "$RESULT" = "success" ]; then
+            echo "✅ Exit Node Deployed Successfully"
+            echo "   Name: $NAME"
+            echo "   IP: $IP"
+            echo "   Connect: tailscale up --exit-node=$IP"
           else
-            echo "❌ DEPLOYMENT FAILED"
-            echo ""
-            echo "Check the logs above for specific error details."
-            echo "Common issues:"
-            echo "  1. TS_KEY secret not configured"
-            echo "  2. Tailscale account limits reached"
-            echo "  3. Network connectivity issues"
+            echo "❌ Deployment Failed - Check logs above"
           fi
-          
-          echo "════════════════════════════════════════════════════════════"
