@@ -46,30 +46,41 @@ jobs:
           Write-Host "[*] Installing Tailscale..."
           choco install tailscale -y --no-progress
 
-          # Tailscale MSI installs to this path by default
-          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tsExe)) {
-            # Fallback: search for tailscale.exe in common locations
-            $tsExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          # Tailscale MSI installs to this fixed path
+          $defaultPath = "C:\Program Files\Tailscale\tailscale.exe"
+          if (Test-Path $defaultPath) {
+            Write-Host "Tailscale found at: $defaultPath"
+          } else {
+            # Fallback search in case of rare changes
+            $found = Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) {
+              Write-Host "Tailscale found at: $($found.FullName)"
+            } else {
+              Write-Host "ERROR: tailscale.exe not found after installation"
+              exit 1
+            }
           }
-
-          Write-Host "Tailscale executable: $tsExe"
-          & $tsExe version
-
-          # Store the path for later steps
-          Write-Output "ts_exe=$tsExe" >> $env:GITHUB_OUTPUT
+          Write-Host "Tailscale version:"
+          & "C:\Program Files\Tailscale\tailscale.exe" version
 
       - name: Connect to Tailscale
         id: ts_connect
         run: |
-          $tsExe = "${{ steps.ts_install.outputs.ts_exe }}"
+          # Hardcoded default path + fallback
+          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tsExe)) {
+            $tsExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          if (-not $tsExe) {
+            Write-Host "ERROR: Cannot locate tailscale.exe"
+            exit 1
+          }
           Write-Host "[*] Connecting to Tailscale using $tsExe"
 
-          # Generate a short random hostname
+          # Random hostname
           $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_}))
 
           $mode = "${{ github.event.inputs.exit_node_mode || 'performance' }}"
-
           $args = "--accept-routes --accept-dns=true"
           if ($mode -eq "performance") {
             $args += " --advertise-exit-node"
@@ -97,10 +108,17 @@ jobs:
           Write-Output "ts_ip=$ip" >> $env:GITHUB_OUTPUT
 
       - name: 24/7 Monitor & Auto-Recovery
-        env:
-          HEALTH_CHECK_INTERVAL: ${{ env.HEALTH_CHECK_INTERVAL }}
         run: |
-          $tsExe = "${{ steps.ts_install.outputs.ts_exe }}"
+          # Locate tailscale.exe (same logic)
+          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tsExe)) {
+            $tsExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          if (-not $tsExe) {
+            Write-Host "ERROR: Cannot locate tailscale.exe"
+            exit 1
+          }
+
           $ip = "${{ steps.ts_connect.outputs.ts_ip }}"
           $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_}))
           $failCount = 0
@@ -122,7 +140,6 @@ jobs:
             $online = $false
             $statusOut = & $tsExe status 2>&1 | Out-String
 
-            # Check for our node online
             if ($statusOut -match $ip -and $statusOut -notmatch "offline") {
               $online = $true
             }
@@ -143,7 +160,7 @@ jobs:
               }
             }
 
-            # Exit before 6‑hour timeout (350 minutes)
+            # Graceful exit before 6‑hour timeout (350 minutes)
             if ($elapsed.TotalSeconds -ge 21000) {
               Write-Host "╔══════════════════════════════════════╗"
               Write-Host "║   TIMEOUT – GRACEFUL SHUTDOWN       ║"
@@ -152,7 +169,7 @@ jobs:
               break
             }
 
-            Start-Sleep -Seconds $env:HEALTH_CHECK_INTERVAL
+            Start-Sleep -Seconds ${{ env.HEALTH_CHECK_INTERVAL }}
           }
 
   summary:
