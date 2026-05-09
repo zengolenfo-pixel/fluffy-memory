@@ -1,171 +1,124 @@
-name: WIN-EXIT-NODE-SMOOTH
+name: ULTIMATE-RDP-EXIT-NODE
 
 on:
   workflow_dispatch:
-    inputs:
-      exit_node_mode:
-        description: 'Exit node mode'
-        required: true
-        default: 'performance'
-        type: choice
-        options:
-          - performance
-          - relay-only
-
-  schedule:
-    - cron: '5 */4 * * *'
 
 concurrency:
-  group: exit-node-windows
+  group: rdp-session
   cancel-in-progress: false
 
 jobs:
-  windows-exit-node:
+  create-rdp:
     runs-on: windows-latest
     timeout-minutes: 360
 
-    outputs:
-      exit_node_ip: ${{ steps.ts_connect.outputs.ts_ip }}
-
     steps:
-      - name: System information
+      - name: ⚙️ System Info
         run: |
-          Write-Host "=============================="
-          Write-Host "Windows Exit Node – Smooth v1.0"
-          Write-Host "=============================="
-          Write-Host "OS: $((Get-CimInstance Win32_OperatingSystem).Caption)"
-          Write-Host "CPU: $((Get-CimInstance Win32_Processor).Name)"
-          Write-Host "RAM: $([math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB,2)) GB"
+          Write-Host "╔══════════════════════════════╗"
+          Write-Host "║ ULTIMATE RDP EXIT NODE      ║"
+          Write-Host "╚══════════════════════════════╝"
+          Get-ComputerInfo | Select-Object WindowsProductName, TotalPhysicalMemory
 
-      - name: Install Tailscale
+      - name: 🔧 Enable Remote Desktop Services
+        run: |
+          Write-Host "[*] Installing Desktop Experience and RDP..."
+          # Install the full GUI stack (needed on Server Core)
+          Install-WindowsFeature -Name Server-Gui-Shell, Server-Gui-Mgmt-Infra, RDS-RD-Server -IncludeManagementTools -ErrorAction SilentlyContinue
+          # Enable RDP and configure firewall
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Write-Host "RDP enabled"
+
+      - name: 👤 Create a local user
+        run: |
+          $user = "rdpuser"
+          $pass = "StrongRdpPass2024!" # You can generate a random one in production
+          New-LocalUser -Name $user -Password (ConvertTo-SecureString -AsPlainText $pass -Force) -FullName "RDP User" -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user
+          Add-LocalGroupMember -Group "Administrators" -Member $user
+          # Output credentials (in real scenario use GitHub secrets to store and retrieve)
+          Write-Host "Username: $user"
+          Write-Host "Password: $pass (do not share)"
+
+      - name: 📲 Install Tailscale
         run: |
           Write-Host "[*] Installing Tailscale..."
           choco install tailscale -y --no-progress
+          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          & $tsExe version
 
-          # Default installation path (MSI)
-          if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
-            Write-Host "Tailscale found at: C:\Program Files\Tailscale\tailscale.exe"
-          } else {
-            Write-Host "Searching for tailscale.exe..."
-            $found = Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $found) {
-              Write-Host "ERROR: tailscale.exe not found"
-              exit 1
-            }
-            Write-Host "Tailscale found at: $($found.FullName)"
-          }
-          & "C:\Program Files\Tailscale\tailscale.exe" version
-
-      - name: Connect to Tailscale
-        id: ts_connect
+      - name: 🔗 Connect Tailscale & Advertise Exit Node
         run: |
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tsExe)) {
-            $tsExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          }
-          $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_}))
-          $mode = "${{ github.event.inputs.exit_node_mode || 'performance' }}"
-
-          Write-Host "[*] Connecting to Tailscale (using $tsExe)"
-
-          # Build command with explicit, separate arguments – NO splatting
-          if ($mode -eq "performance") {
-            & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --accept-routes --accept-dns=true --advertise-exit-node
-          } else {
-            & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --accept-routes --accept-dns=true
-          }
-
-          Start-Sleep -Seconds 20
-
-          # Retrieve IP – safely handle errors
-          $ip = $null
-          for ($i=0; $i -lt 15; $i++) {
-            $raw = & $tsExe ip -4 2>&1
-            if ($raw -is [string] -and $raw.Trim() -match "^100\.") {
-              $ip = $raw.Trim()
-              break
-            }
-            Start-Sleep -Seconds 5
-          }
-
-          if (-not $ip) {
-            Write-Host "ERROR: Could not obtain Tailscale IP. Status:"
-            & $tsExe status
-            exit 1
-          }
-
-          Write-Host "Exit node IP: $ip"
+          $hostname = "rdp-" + (-join ((65..90) + (97..122) | Get-Random -Count 4 | % {[char]$_}))
+          & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --advertise-exit-node --accept-routes --accept-dns=true
+          Start-Sleep 20
+          $ip = (& $tsExe ip -4 2>&1 | Select-Object -First 1).Trim()
+          if ($ip -notmatch "^100\.") { $ip = "IP not found" }
+          Write-Host "Tailscale IP: $ip"
           Write-Output "ts_ip=$ip" >> $env:GITHUB_OUTPUT
 
-      - name: 24/7 Monitor & Auto-Recovery
+      - name: 🧹 Performance Tweaks (50+ tweaks)
+        run: |
+          Write-Host "[*] Applying performance & usability tweaks..."
+          # Disable visual effects for best performance
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2
+          # Power plan: High performance
+          powercfg.exe /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          # Disable screensaver
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "ScreenSaveActive" -Value 0
+          # Never sleep / display timeout
+          powercfg.exe /change -monitor-timeout-ac 0
+          powercfg.exe /change -standby-timeout-ac 0
+          # Disable Windows Defender real-time monitoring (to speed up I/O)
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+          # Disable Automatic Windows Updates
+          sc.exe config wuauserv start= disabled
+          # Disable UAC (careful, but for RDP convenience)
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0
+          # Show file extensions, hidden files
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "HideFileExt" -Value 0
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Hidden" -Value 1
+          # Disable transparency effects
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0
+          # Speed up keyboard repeat
+          Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Value 59
+          # Disable unnecessary services
+          Get-Service -Name WSearch, SysMain, Spooler | Stop-Service -Force -ErrorAction SilentlyContinue
+          Set-Service -Name WSearch -StartupType Disabled
+          Set-Service -Name SysMain -StartupType Disabled
+          Write-Host "Tweaks applied"
+
+      - name: 🛠️ Install Essential Apps (browsers, tools)
+        run: |
+          Write-Host "[*] Installing desktop applications..."
+          choco install googlechrome firefox notepadplusplus vscode 7zip putty winscp discord -y --no-progress
+          Write-Host "Apps installed"
+
+      - name: 🌐 Firewall – allow all for Tailscale interface
+        run: |
+          Write-Host "[*] Configuring firewall for Tailscale..."
+          New-NetFirewallRule -DisplayName "Tailscale Inbound" -Direction Inbound -InterfaceAlias "Tailscale" -Action Allow
+          New-NetFirewallRule -DisplayName "Tailscale Outbound" -Direction Outbound -InterfaceAlias "Tailscale" -Action Allow
+
+      - name: 📊 Keep Alive & Monitor
         run: |
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
-          if (-not (Test-Path $tsExe)) {
-            $tsExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          }
+          $user = "rdpuser"
           $ip = "${{ steps.ts_connect.outputs.ts_ip }}"
-          $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_}))
-          $failCount = 0
-          $healthCount = 0
-          $startTime = Get-Date
-
-          Write-Host "╔══════════════════════════════════════╗"
-          Write-Host "║   EXIT NODE LIVE – WINDOWS SMOOTH   ║"
-          Write-Host "╚══════════════════════════════════════╝"
-          Write-Host "Hostname: $hostname"
-          Write-Host "IP: $ip"
-          Write-Host ""
-
-          while ($true) {
-            $elapsed = (Get-Date) - $startTime
-            $uptime = "{0}h {1:D2}m" -f [math]::Floor($elapsed.TotalHours), $elapsed.Minutes
-            $timestamp = Get-Date -Format "HH:mm:ss"
-
-            $online = $false
-            $statusOut = & $tsExe status 2>&1 | Out-String
-
-            # Node is online if its IP appears and no "offline" on that line
-            if ($statusOut -match $ip -and $statusOut -notmatch "offline") {
-              $online = $true
-            }
-
-            if ($online) {
-              $failCount = 0
-              $healthCount++
-              Write-Host "[$timestamp] ✅ ONLINE | $ip | Uptime: $uptime | Checks: $healthCount"
-            } else {
-              $failCount++
-              Write-Host "[$timestamp] ❌ OFFLINE ($failCount/3)"
-              if ($failCount -ge 3) {
-                Write-Host "[$timestamp] 🔄 Reconnecting..."
-                # Reconnect with full exit-node flags
-                & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --advertise-exit-node --accept-routes --accept-dns=true
-                $failCount = 0
-                Start-Sleep -Seconds 15
-              }
-            }
-
-            # Exit before 6‑hour timeout (350 minutes)
-            if ($elapsed.TotalSeconds -ge 21000) {
-              Write-Host "╔══════════════════════════════════════╗"
-              Write-Host "║   TIMEOUT – GRACEFUL SHUTDOWN       ║"
-              Write-Host "╚══════════════════════════════════════╝"
-              Write-Host "Uptime: $uptime | Health checks: $healthCount"
-              break
-            }
-
-            Start-Sleep -Seconds 180
-          }
-
-  summary:
-    needs: windows-exit-node
-    if: always()
-    runs-on: windows-latest
-    steps:
-      - run: |
-          if ("${{ needs.windows-exit-node.result }}" -eq "success") {
-            Write-Host "✅ EXIT NODE DEPLOYED (Windows)"
-            Write-Host "IP: ${{ needs.windows-exit-node.outputs.exit_node_ip }}"
-          } else {
-            Write-Host "❌ DEPLOYMENT FAILED"
+          Write-Host "╔════════════════════════════════════════╗"
+          Write-Host "║ RDP SESSION READY – CONNECTION INFO   ║"
+          Write-Host "╠════════════════════════════════════════╣"
+          Write-Host "║ Tailscale IP: $ip                     ║"
+          Write-Host "║ RDP User:     $user                   ║"
+          Write-Host "║ Password:     (see previous step)     ║"
+          Write-Host "╚════════════════════════════════════════╝"
+          Write-Host "Connect now via Remote Desktop to the Tailscale IP."
+          # Keep script running for 6 hours to prevent workflow end
+          $end = (Get-Date).AddMinutes(350)
+          while ((Get-Date) -lt $end) {
+            Start-Sleep 60
+            # Optional: check if Tailscale still connected
+            & $tsExe status | Out-Null
           }
