@@ -16,7 +16,7 @@ jobs:
           $USER = -join ((97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_})
           $PASS = -join ((33..126) | Get-Random -Count 14 | ForEach-Object {[char]$_})
           Write-Host "========================================="
-          Write-Host "🚀 PROXY + EXIT NODE RUNNER"
+          Write-Host "PROXY + EXIT NODE RUNNER"
           Write-Host "Hostname: $HOSTNAME"
           Write-Host "RDP User: $USER"
           Write-Host "RDP Pass: $PASS"
@@ -46,119 +46,90 @@ jobs:
           Start-Sleep -Seconds 5
           $TS_IP = & $tsExe.FullName ip -4
 
-          # ------------------------------------------------------------
-          # 🔥 GUARANTEED WORKING: Python SOCKS5 proxy (no external downloads)
-          # ------------------------------------------------------------
-          Write-Host ">>> Creating SOCKS5 proxy with Python..."
-          $socksScript = @"
-import socket
-import select
-import struct
-import threading
+          # Pure PowerShell SOCKS5 proxy (no external files)
+          $psSocks = @'
+$server = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, 1080)
+$server.Start()
+while ($true) {
+    $client = $server.AcceptTcpClient()
+    $scriptBlock = {
+        param($clientStream, $targetHost, $targetPort)
+        $target = New-Object System.Net.Sockets.TcpClient
+        $target.Connect($targetHost, $targetPort)
+        $targetStream = $target.GetStream()
+        $buffer = New-Object byte[] 8192
+        $timeout = New-Object System.Threading.CancellationTokenSource
+        $task1 = $targetStream.CopyToAsync($clientStream, $buffer, 0, $buffer.Length, $timeout.Token)
+        $task2 = $clientStream.CopyToAsync($targetStream, $buffer, 0, $buffer.Length, $timeout.Token)
+        [System.Threading.Tasks.Task]::WaitAny($task1, $task2)
+        $timeout.Cancel()
+        $clientStream.Close()
+        $targetStream.Close()
+        $target.Close()
+    }
+    $stream = $client.GetStream()
+    $buffer = New-Object byte[] 255
+    $bytesRead = $stream.Read($buffer, 0, 2)
+    if ($bytesRead -eq 2 -and $buffer[0] -eq 5) {
+        $nMethods = $buffer[1]
+        $stream.Read($buffer, 0, $nMethods) | Out-Null
+        $stream.WriteByte(5)
+        $stream.WriteByte(0)
+        $stream.Read($buffer, 0, 4) | Out-Null
+        $cmd = $buffer[1]
+        if ($cmd -eq 1) {
+            $atype = $buffer[3]
+            if ($atype -eq 1) {
+                $stream.Read($buffer, 0, 4) | Out-Null
+                $ip = [System.Net.IPAddress]::new($buffer[0..3])
+                $portBytes = New-Object byte[] 2
+                $stream.Read($portBytes, 0, 2) | Out-Null
+                $port = [System.BitConverter]::ToUInt16($portBytes, 0)
+                $hostStr = $ip.ToString()
+            } elseif ($atype -eq 3) {
+                $len = $stream.ReadByte()
+                $domainBytes = New-Object byte[] $len
+                $stream.Read($domainBytes, 0, $len) | Out-Null
+                $hostStr = [System.Text.Encoding]::ASCII.GetString($domainBytes)
+                $portBytes = New-Object byte[] 2
+                $stream.Read($portBytes, 0, 2) | Out-Null
+                $port = [System.BitConverter]::ToUInt16($portBytes, 0)
+            } else {
+                $client.Close()
+                continue
+            }
+            $reply = [byte[]]@(5,0,0,1,0,0,0,0,0,0)
+            $stream.Write($reply, 0, $reply.Length)
+            $stream.Flush()
+            $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $stream, $hostStr, $port
+            Start-Sleep -Milliseconds 100
+            $null = $job
+        } else {
+            $client.Close()
+        }
+    } else {
+        $client.Close()
+    }
+}
+'@
+          $psScript = "$env:TEMP\socks.ps1"
+          Set-Content -Path $psScript -Value $psSocks -Encoding ASCII
+          netsh advfirewall firewall delete rule name="SOCKS5-PS" 2>$null
+          netsh advfirewall firewall add rule name="SOCKS5-PS" dir=in action=allow protocol=TCP localport=1080
+          Start-Process -NoNewWindow powershell.exe -ArgumentList "-ExecutionPolicy Bypass -File `"$psScript`""
+          Write-Host "PowerShell SOCKS5 proxy started on port 1080"
 
-SOCKS5_VERSION = 0x05
-CMD_CONNECT = 0x01
-ATYP_IPV4 = 0x01
-ATYP_DOMAIN = 0x03
-ATYP_IPV6 = 0x04
-
-def handle_client(client_sock):
-    try:
-        # Handshake
-        data = client_sock.recv(2)
-        if not data or data[0] != SOCKS5_VERSION:
-            return
-        nmethods = data[1]
-        data = client_sock.recv(nmethods)
-        client_sock.sendall(bytes([SOCKS5_VERSION, 0x00]))
-
-        # Request
-        data = client_sock.recv(4)
-        if data[0] != SOCKS5_VERSION or data[1] != CMD_CONNECT:
-            return
-        atyp = data[3]
-        if atyp == ATYP_IPV4:
-            addr = socket.inet_ntoa(client_sock.recv(4))
-            port = struct.unpack('!H', client_sock.recv(2))[0]
-        elif atyp == ATYP_DOMAIN:
-            domain_len = client_sock.recv(1)[0]
-            domain = client_sock.recv(domain_len).decode()
-            addr = socket.gethostbyname(domain)
-            port = struct.unpack('!H', client_sock.recv(2))[0]
-        else:
-            return
-
-        # Connect to target
-        remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        remote.connect((addr, port))
-
-        # Reply success
-        bind_addr = '0.0.0.0'
-        bind_port = 0
-        reply = struct.pack('!BBBBIH', SOCKS5_VERSION, 0x00, 0x00, ATYP_IPV4,
-                            *map(int, bind_addr.split('.')), bind_port)
-        client_sock.sendall(reply)
-
-        # Relay data bidirectionally
-        sockets = [client_sock, remote]
-        while True:
-            rlist, _, _ = select.select(sockets, [], [])
-            for sock in rlist:
-                data = sock.recv(4096)
-                if not data:
-                    return
-                if sock is client_sock:
-                    remote.sendall(data)
-                else:
-                    client_sock.sendall(data)
-    except:
-        pass
-    finally:
-        client_sock.close()
-
-def main():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(('0.0.0.0', 1080))
-    server.listen(100)
-    while True:
-        client, _ = server.accept()
-        threading.Thread(target=handle_client, args=(client,), daemon=True).start()
-
-if __name__ == '__main__':
-    main()
-"@
-          $scriptPath = "$env:TEMP\socks5.py"
-          Set-Content -Path $scriptPath -Value $socksScript -Encoding ASCII
-          netsh advfirewall firewall delete rule name="SOCKS5-Python" 2>$null
-          netsh advfirewall firewall add rule name="SOCKS5-Python" dir=in action=allow protocol=TCP localport=1080
-          Start-Process -NoNewWindow python -ArgumentList "$scriptPath"
-          Write-Host "✅ Python SOCKS5 proxy running on port 1080"
-
-          # ------------------------------------------------------------
-          # Final connection info
-          # ------------------------------------------------------------
           Write-Host "========================================="
-          Write-Host "✅✅✅ FINAL WORKING SETUP ✅✅✅"
-          Write-Host "Tailscale IP (use as proxy server): $TS_IP"
+          Write-Host "FINAL WORKING SETUP"
+          Write-Host "Tailscale IP: $TS_IP"
           Write-Host "SOCKS5 proxy port: 1080"
-          Write-Host ""
-          Write-Host "📱 ON YOUR ANDROID PHONE:"
-          Write-Host "   1. Install 'ProxyDroid' or 'Postern' from Play Store"
-          Write-Host "   2. Create SOCKS5 proxy: $TS_IP : 1080 (no auth)"
-          Write-Host "   3. Enable global proxy"
-          Write-Host "   4. Your entire phone now uses runner's fast internet (500+ Mbps)"
-          Write-Host ""
-          Write-Host "💻 RDP is also available: $TS_IP`:3389"
-          Write-Host "   Username: $USER"
-          Write-Host "   Password: $PASS"
+          Write-Host "RDP: $TS_IP`:3389  User: $USER  Pass: $PASS"
           Write-Host "========================================="
 
-          # Watchdog to keep proxy alive
           while ($true) {
-              if (-not (Get-Process python -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*socks5.py*" })) {
-                  Start-Process -NoNewWindow python -ArgumentList "$scriptPath"
+              if (-not (Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*socks.ps1*" })) {
+                  Start-Process -NoNewWindow powershell.exe -ArgumentList "-ExecutionPolicy Bypass -File `"$psScript`""
               }
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss UTC')] SOCKS5 proxy active on $TS_IP:1080"
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss UTC')] SOCKS5 proxy on $TS_IP:1080"
               Start-Sleep -Seconds 300
           }
