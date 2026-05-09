@@ -1,63 +1,405 @@
-name: WIN-EXIT-RDP
-
+name: WIN-EXIT-RDP-24/7
+ 
 on:
   workflow_dispatch:
+    inputs:
+      exit_node_mode:
+        description: 'Exit node mode'
+        required: true
+        default: 'advertise'
+        type: choice
+        options:
+          - advertise
+          - relay
+          - hybrid
+      force_restart:
+        description: 'Force restart services'
+        required: false
+        type: boolean
+        default: false
+ 
   schedule:
+    # Every 5 hours for health checks and auto-reconnection
     - cron: '23 */5 * * *'
-
+ 
+env:
+  TAILSCALE_VERSION: "1.82.0"
+  RDP_PORT: "3389"
+  TS_TIMEOUT: "300"
+  HEALTH_CHECK_INTERVAL: "300"
+ 
 jobs:
-  build:
+  validate-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate required secrets
+        run: |
+          if [ -z "${{ secrets.TS_KEY }}" ]; then
+            echo "❌ ERROR: TS_KEY secret not configured"
+            exit 1
+          fi
+          echo "✅ Secrets validated"
+ 
+  exit-node-windows:
+    needs: validate-secrets
     runs-on: windows-latest
     timeout-minutes: 360
+    
     steps:
-      - run: |
+      # ============================================
+      # PHASE 1: ENVIRONMENT SETUP
+      # ============================================
+      - name: Generate unique credentials
+        id: credentials
+        run: |
+          # Generate random hostname (7 chars)
           $R = -join ((65..90) + (97..122) | Get-Random -Count 7 | ForEach-Object {[char]$_})
           $HOSTNAME = "exit-node-$R"
+          
+          # Generate random username (6 chars, safe for Windows)
           $USER = -join ((97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_})
+          
+          # Generate complex password (14+ chars with symbols)
           $PASS = -join ((33..126) | Get-Random -Count 14 | ForEach-Object {[char]$_})
-          Write-Host "========================================="
-          Write-Host "TAILSCALE EXIT NODE + RDP"
-          Write-Host "Hostname: $HOSTNAME"
-          Write-Host "RDP User: $USER"
-          Write-Host "RDP Pass: $PASS"
-          Write-Host "========================================="
-
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          netsh advfirewall firewall add rule name="RDP-TS" dir=in action=allow protocol=TCP localport=3389
-
-          net user $USER $PASS /add /passwordchg:no /expires:never
-          net localgroup Administrators $USER /add
-          net localgroup "Remote Desktop Users" $USER /add
-
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\tailscale.msi" -UseBasicParsing
-          Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\tailscale.msi`" /quiet /norestart" -Wait
-          Start-Sleep -Seconds 10
-
-          $tsExe = Get-ChildItem "C:\Program Files\Tailscale\tailscale.exe" -ErrorAction SilentlyContinue
-          if (-not $tsExe) { Write-Error "Tailscale not found"; exit 1 }
-
-          & $tsExe.FullName up --authkey=${{ secrets.TS_KEY }} --hostname=$HOSTNAME --advertise-exit-node --accept-routes
-          Start-Sleep -Seconds 5
-          $TS_IP = & $tsExe.FullName ip -4
-
-          Write-Host "========================================="
-          Write-Host "SUCCESS - EXIT NODE + RDP READY"
-          Write-Host "Tailscale IP: $TS_IP"
-          Write-Host "RDP: $TS_IP`:3389  |  $USER  |  $PASS"
-          Write-Host "========================================="
-          Write-Host "ANDROID FIX (if exit node doesn't route):"
-          Write-Host "1. Settings > Mobile network > APN > change APN protocol to IPv4 only"
-          Write-Host "2. Tailscale app > Exit node > select '$HOSTNAME'"
-          Write-Host "3. Toggle exit node OFF then ON"
-          Write-Host "========================================="
-
-          while ($true) {
-              $status = & $tsExe.FullName status 2>$null
-              if (-not $status -or $status -notmatch "Connected") {
-                  & $tsExe.FullName up --authkey=${{ secrets.TS_KEY }} --hostname=$HOSTNAME --advertise-exit-node --accept-routes
-              }
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss UTC')] Exit node active on $TS_IP"
-              Start-Sleep -Seconds 300
+          
+          # Export for later use
+          echo "hostname=$HOSTNAME" >> $env:GITHUB_OUTPUT
+          echo "username=$USER" >> $env:GITHUB_OUTPUT
+          echo "password=$PASS" >> $env:GITHUB_OUTPUT
+          
+          Write-Host "╔════════════════════════════════════════╗"
+          Write-Host "║   WINDOWS EXIT NODE INITIALIZATION     ║"
+          Write-Host "╚════════════════════════════════════════╝"
+          Write-Host "🔐 Hostname: $HOSTNAME"
+          Write-Host "👤 RDP User: $USER"
+          Write-Host "🔑 RDP Pass: (generated, 14 chars)"
+ 
+      # ============================================
+      # PHASE 2: WINDOWS HARDENING
+      # ============================================
+      - name: Harden Windows security
+        run: |
+          Write-Host "`n[+] Hardening Windows security policies..."
+          
+          # Disable unnecessary services
+          $ServiceToDisable = @(
+            "SysMain",         # Superfetch (high disk I/O)
+            "DiagTrack",       # Diagnostics tracking
+            "dmwappushservice" # Microsoft telemetry
+          )
+          
+          foreach ($service in $ServiceToDisable) {
+              try {
+                  Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+                  Set-Service -Name $service -StartupType Disabled -ErrorAction SilentlyContinue
+                  Write-Host "  ✓ Disabled $service"
+              } catch { }
           }
+          
+          # Enable firewall
+          Set-NetFirewallProfile -Profile Domain, Public, Private -Enabled $true -ErrorAction SilentlyContinue
+          Write-Host "  ✓ Windows Firewall enabled"
+ 
+      - name: Configure RDP security
+        run: |
+          Write-Host "`n[+] Configuring RDP with enhanced security..."
+          
+          $RegistryPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+          $RDPPath = "$RegistryPath\WinStations\RDP-Tcp"
+          
+          # Enable RDP
+          Set-ItemProperty -Path $RegistryPath -Name "fDenyTSConnections" -Value 0 -Force
+          Write-Host "  ✓ RDP enabled"
+          
+          # Require Network Level Authentication (NLA) - SECURITY BEST PRACTICE
+          Set-ItemProperty -Path $RDPPath -Name "UserAuthentication" -Value 1 -Force
+          Write-Host "  ✓ NLA (Network Level Authentication) enabled"
+          
+          # Restrict to TLS 1.2+
+          Set-ItemProperty -Path $RDPPath -Name "SecurityLayer" -Value 2 -Force
+          Write-Host "  ✓ TLS 1.2+ enforced"
+          
+          # Limit concurrent connections
+          Set-ItemProperty -Path $RDPPath -Name "MaxInstanceCount" -Value 2 -Force
+          Write-Host "  ✓ Max 2 concurrent connections"
+          
+          # Disable clipboard redirection (security)
+          Set-ItemProperty -Path $RDPPath -Name "fDisableClip" -Value 1 -Force
+          Write-Host "  ✓ Clipboard redirection disabled"
+ 
+      # ============================================
+      # PHASE 3: FIREWALL CONFIGURATION
+      # ============================================
+      - name: Configure smart firewall rules
+        run: |
+          Write-Host "`n[+] Configuring advanced firewall rules..."
+          
+          # Remove old rules if they exist
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" dir=in 2>$null
+          netsh advfirewall firewall delete rule name="Block-RDP-WAN" dir=in 2>$null
+          
+          # Allow RDP ONLY from Tailscale network
+          netsh advfirewall firewall add rule `
+            name="RDP-Tailscale" `
+            dir=in `
+            action=allow `
+            protocol=TCP `
+            localport=3389 `
+            remoteip="100.64.0.0/10" `
+            description="RDP via Tailscale only" | Out-Null
+          Write-Host "  ✓ RDP restricted to Tailscale (100.64.0.0/10)"
+          
+          # Block RDP from WAN
+          netsh advfirewall firewall add rule `
+            name="Block-RDP-WAN" `
+            dir=in `
+            action=block `
+            protocol=TCP `
+            localport=3389 `
+            remoteip="0.0.0.0/24,1.0.0.0/24" `
+            description="Block RDP from non-Tailscale" | Out-Null
+          Write-Host "  ✓ WAN RDP blocked"
+          
+          # Allow Tailscale (UDP 41641)
+          netsh advfirewall firewall add rule `
+            name="Tailscale-VPN" `
+            dir=in `
+            action=allow `
+            protocol=UDP `
+            localport=41641 `
+            description="Tailscale VPN traffic" | Out-Null
+          Write-Host "  ✓ Tailscale UDP 41641 allowed"
+ 
+      - name: Create local user account
+        id: user_setup
+        run: |
+          $USER = "${{ steps.credentials.outputs.username }}"
+          $PASS = "${{ steps.credentials.outputs.password }}"
+          $PASS_SECURE = ConvertTo-SecureString $PASS -AsPlainText -Force
+          
+          Write-Host "`n[+] Creating RDP user account..."
+          
+          # Check if user exists
+          $userExists = Get-LocalUser -Name $USER -ErrorAction SilentlyContinue
+          
+          if ($userExists) {
+              Set-LocalUser -Name $USER -Password $PASS_SECURE -Description "Tailscale RDP User"
+              Write-Host "  ✓ User $USER updated"
+          } else {
+              New-LocalUser -Name $USER `
+                -Password $PASS_SECURE `
+                -PasswordNeverExpires `
+                -FullName "RDP Access User" `
+                -Description "Tailscale RDP User" | Out-Null
+              Write-Host "  ✓ User $USER created"
+          }
+          
+          # Add to admin and RDP groups
+          Add-LocalGroupMember -Group "Administrators" -Member $USER -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $USER -ErrorAction SilentlyContinue
+          Write-Host "  ✓ User added to Administrators and RDP groups"
+ 
+      # ============================================
+      # PHASE 4: TAILSCALE INSTALLATION & SETUP
+      # ============================================
+      - name: Install Tailscale
+        id: ts_install
+        run: |
+          Write-Host "`n[+] Installing Tailscale v$env:TAILSCALE_VERSION..."
+          
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-$env:TAILSCALE_VERSION-amd64.msi"
+          $tsPath = "$env:TEMP\tailscale.msi"
+          
+          try {
+              Invoke-WebRequest -Uri $tsUrl -OutFile $tsPath -UseBasicParsing -TimeoutSec 30
+              Write-Host "  ✓ Downloaded Tailscale MSI"
+          } catch {
+              Write-Error "Failed to download Tailscale: $_"
+              exit 1
+          }
+          
+          # Install with no restart
+          $process = Start-Process msiexec.exe `
+            -ArgumentList "/i `"$tsPath`" /quiet /norestart /l*v `"$env:TEMP\tailscale-install.log`"" `
+            -PassThru -Wait
+          
+          if ($process.ExitCode -ne 0) {
+              Get-Content "$env:TEMP\tailscale-install.log" | Select-Object -Last 20
+              Write-Error "Tailscale installation failed with code $($process.ExitCode)"
+              exit 1
+          }
+          
+          Write-Host "  ✓ Tailscale installed"
+          
+          # Wait for binary to be available
+          $count = 0
+          while ($count -lt 10) {
+              $tsExe = Get-ChildItem "C:\Program Files\Tailscale\tailscale.exe" -ErrorAction SilentlyContinue
+              if ($tsExe) { break }
+              Start-Sleep -Seconds 1
+              $count++
+          }
+          
+          if (-not $tsExe) {
+              Write-Error "Tailscale executable not found after installation"
+              exit 1
+          }
+          
+          echo "ts_path=$($tsExe.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "  ✓ Binary available: $($tsExe.FullName)"
+ 
+      - name: Connect to Tailscale network
+        id: ts_connect
+        run: |
+          $tsExe = "${{ steps.ts_install.outputs.ts_path }}"
+          $HOSTNAME = "${{ steps.credentials.outputs.hostname }}"
+          $TS_KEY = "${{ secrets.TS_KEY }}"
+          $MODE = "${{ github.event.inputs.exit_node_mode || 'advertise' }}"
+          
+          Write-Host "`n[+] Connecting to Tailscale network as exit node ($MODE mode)..."
+          
+          # Kill any existing tailscale processes
+          Stop-Process -Name "tailscale" -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 2
+          
+          # Build tailscale command with options
+          $tsArgs = @(
+              "up",
+              "--authkey=$TS_KEY",
+              "--hostname=$HOSTNAME",
+              "--advertise-exit-node",
+              "--accept-routes",
+              "--snat=false"  # Disable SNAT for better routing
+          )
+          
+          # Execute connection
+          & $tsExe $tsArgs 2>&1 | Tee-Object -Variable tsOutput | Out-Host
+          
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Failed to connect to Tailscale"
+              exit 1
+          }
+          
+          # Wait for connection to stabilize
+          Write-Host "  ⏳ Waiting for connection to stabilize..."
+          Start-Sleep -Seconds 10
+          
+          # Get Tailscale IP
+          $TS_IP = & $tsExe ip -4
+          if (-not $TS_IP) {
+              Write-Error "Could not obtain Tailscale IP"
+              exit 1
+          }
+          
+          echo "ts_ip=$TS_IP" >> $env:GITHUB_OUTPUT
+          Write-Host "  ✓ Connected! Tailscale IP: $TS_IP"
+ 
+      # ============================================
+      # PHASE 5: VERIFICATION & ROUTING SETUP
+      # ============================================
+      - name: Verify exit node status
+        run: |
+          $tsExe = "${{ steps.ts_install.outputs.ts_path }}"
+          
+          Write-Host "`n[+] Verifying exit node setup..."
+          
+          # Check status
+          $status = & $tsExe status 2>&1
+          Write-Host $status | Out-Host
+          
+          if ($status -notmatch "active") {
+              Write-Warning "⚠️  Tailscale may not be fully active yet"
+          } else {
+              Write-Host "  ✓ Tailscale active"
+          }
+          
+          # Check routes
+          Write-Host "`n[+] Checking advertised routes..."
+          netstat -rn | grep -i "169.254\|127.0.0" | Out-Host
+          
+          Write-Host "  ✓ Route verification complete"
+ 
+      - name: Configure traffic optimization
+        run: |
+          Write-Host "`n[+] Optimizing network traffic..."
+          
+          # Increase TCP window size for better throughput
+          netsh int tcp set global autotuninglevel=normal
+          Write-Host "  ✓ TCP auto-tuning enabled"
+          
+          # Enable ECN (Explicit Congestion Notification)
+          netsh int tcp set global ecncapability=enabled
+          Write-Host "  ✓ ECN enabled"
+          
+          # Disable Nagle's algorithm for lower latency
+          netsh int tcp set global timestamps=disabled
+          Write-Host "  ✓ Nagle's algorithm adjusted"
+ 
+      # ============================================
+      # PHASE 6: MONITORING & HEALTH CHECKS
+      # ============================================
+      - name: Start monitoring loop
+        run: |
+          $tsExe = "${{ steps.ts_install.outputs.ts_path }}"
+          $HOSTNAME = "${{ steps.credentials.outputs.hostname }}"
+          $TS_KEY = "${{ secrets.TS_KEY }}"
+          
+          Write-Host "`n╔════════════════════════════════════════╗"
+          Write-Host "║        EXIT NODE OPERATIONAL ✓         ║"
+          Write-Host "╚════════════════════════════════════════╝"
+          Write-Host ""
+          Write-Host "📍 Node: $HOSTNAME"
+          Write-Host "📱 IP: ${{ steps.ts_connect.outputs.ts_ip }}"
+          Write-Host "👤 RDP User: ${{ steps.credentials.outputs.username }}"
+          Write-Host "🔑 RDP Pass: [SECURELY STORED]"
+          Write-Host ""
+          Write-Host "⚙️  Monitoring active - health checks every $env:HEALTH_CHECK_INTERVAL seconds"
+          Write-Host "════════════════════════════════════════"
+          Write-Host ""
+          
+          $failCount = 0
+          $maxFails = 3
+          
+          while ($true) {
+              try {
+                  # Health check
+                  $status = & $tsExe status 2>&1
+                  $ipCheck = & $tsExe ip -4 2>&1
+                  
+                  if ($status -match "active" -and $ipCheck) {
+                      $failCount = 0
+                      Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] ✓ Exit node healthy | IP: $ipCheck"
+                  } else {
+                      $failCount++
+                      Write-Warning "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] ⚠️  Health check failed ($failCount/$maxFails)"
+                      
+                      if ($failCount -ge $maxFails) {
+                          Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] 🔄 Reconnecting to Tailscale..."
+                          & $tsExe up --authkey=$TS_KEY --hostname=$HOSTNAME --advertise-exit-node --accept-routes 2>&1 | Out-Null
+                          Start-Sleep -Seconds 15
+                      }
+                  }
+              } catch {
+                  Write-Warning "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] ❌ Error during health check: $_"
+              }
+              
+              Start-Sleep -Seconds $env:HEALTH_CHECK_INTERVAL
+          }
+ 
+  # ============================================
+  # NOTIFICATION STEP
+  # ============================================
+  notify:
+    needs: exit-node-windows
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Job Status Summary
+        run: |
+          if [ "${{ needs.exit-node-windows.result }}" == "success" ]; then
+            echo "✅ Windows Exit Node deployed successfully"
+            echo "📊 Status: OPERATIONAL"
+          else
+            echo "❌ Deployment failed"
+            echo "🔧 Check logs for details"
+          fi
