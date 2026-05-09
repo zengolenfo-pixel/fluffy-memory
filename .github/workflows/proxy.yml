@@ -28,11 +28,11 @@ on:
     - cron: '5 */4 * * *'
 
 env:
-  TAILSCALE_VERSION: "1.84.0"
+  TAILSCALE_VERSION: "latest"          # Not used for download, just informational
   RDP_PORT: "3389"
   HEALTH_CHECK_INTERVAL: "180"
   TS_PORT: "41641"
-  TS_DIR: "/usr/local/bin"
+  TS_INSTALL_DIR: "/usr/local/bin"
 
 concurrency:
   group: exit-node-production-mac
@@ -84,7 +84,7 @@ jobs:
           echo ""
           echo "[*] ENTERPRISE CREDENTIAL GENERATION"
           
-          # Generate random strings without /dev/urandom (avoids hanging)
+          # Deterministic random generation – no /dev/urandom (which hangs)
           HOSTNAME="mac-$(date +%s | md5 | cut -c1-8)"
           RDP_USER="u$(echo $RANDOM$RANDOM$(date +%s) | md5 | cut -c1-10)"
           RDP_PASS="P$(echo $RANDOM$(date +%s)$RANDOM | md5 | cut -c1-18)!"
@@ -93,81 +93,60 @@ jobs:
           echo "  ✓ RDP User: $RDP_USER"
           echo "  ✓ RDP Pass: Enterprise-grade (${#RDP_PASS} chars)"
           
-          # Output using heredoc to avoid GitHub secret masking issues
+          # Use heredoc to prevent GitHub from masking the password with ***
           echo "hostname=$HOSTNAME" >> $GITHUB_OUTPUT
           echo "username=$RDP_USER" >> $GITHUB_OUTPUT
           echo "password<<EOF" >> $GITHUB_OUTPUT
           echo "$RDP_PASS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Install Tailscale CLI binaries
+      - name: Install Tailscale CLI (headless, no GUI)
         id: ts_install
         run: |
           echo ""
-          echo "[*] TAILSCALE INSTALLATION (HEADLESS CLI)"
+          echo "[*] TAILSCALE HEADLESS INSTALLATION (official script, no App Store)"
           
-          TS_VERSION="${{ env.TAILSCALE_VERSION }}"
-          TS_DIR="${{ env.TS_DIR }}"
-          
-          # Remove any previous App Store or cask GUI installs
+          # Remove previous attempts (GUI or old binaries)
           sudo rm -rf /Applications/Tailscale.app 2>/dev/null || true
           sudo rm -f /usr/local/bin/tailscale /usr/local/bin/tailscaled 2>/dev/null || true
           sudo rm -f /opt/homebrew/bin/tailscale /opt/homebrew/bin/tailscaled 2>/dev/null || true
           
-          echo "  [+] Downloading Tailscale standalone CLI v$TS_VERSION..."
+          # Use the official install script with --no-app flag to get CLI only
+          echo "  [+] Running official installer (no GUI)..."
+          curl -fsSL https://tailscale.com/install.sh | sh -s -- --no-app
           
-          # Determine architecture
-          ARCH=$(uname -m)
-          if [ "$ARCH" = "arm64" ]; then
-            ZIP_NAME="tailscale_${TS_VERSION}_darwin_arm64.zip"
-          else
-            ZIP_NAME="tailscale_${TS_VERSION}_darwin_amd64.zip"
-          fi
+          # Now locate the installed binaries
+          TS_BIN=""
+          TSD_BIN=""
           
-          DOWNLOAD_URL="https://pkgs.tailscale.com/stable/${ZIP_NAME}"
-          echo "  [+] URL: $DOWNLOAD_URL"
-          
-          # Download with retries
-          for i in $(seq 1 5); do
-            if curl -fsSL "$DOWNLOAD_URL" -o /tmp/tailscale.zip; then
-              echo "  ✓ Download successful"
+          # Check common paths (Intel and Apple Silicon)
+          for dir in /usr/local/bin /opt/homebrew/bin; do
+            if [ -x "$dir/tailscale" ]; then
+              TS_BIN="$dir/tailscale"
+              TSD_BIN="$dir/tailscaled"
               break
-            else
-              echo "  ~ Download attempt $i failed, retrying..."
-              sleep 5
             fi
           done
           
-          if [ ! -f /tmp/tailscale.zip ]; then
-            echo "  ❌ Failed to download Tailscale"
+          # Fallback: search system PATH
+          if [ -z "$TS_BIN" ]; then
+            TS_BIN=$(which tailscale 2>/dev/null)
+            TSD_BIN=$(which tailscaled 2>/dev/null)
+          fi
+          
+          if [ -z "$TS_BIN" ] || [ -z "$TSD_BIN" ]; then
+            echo "  ❌ Could not find tailscale/tailscaled after installation"
             exit 1
           fi
           
-          echo "  [+] Extracting binaries..."
-          unzip -o /tmp/tailscale.zip -d /tmp/tailscale-extract
+          echo "  ✓ tailscale:  $TS_BIN"
+          echo "  ✓ tailscaled: $TSD_BIN"
           
-          # Find the extracted directory
-          EXTRACT_DIR=$(find /tmp/tailscale-extract -maxdepth 1 -type d -name "tailscale_*" | head -1)
+          # Show version
+          $TS_BIN version
           
-          if [ -z "$EXTRACT_DIR" ]; then
-            echo "  ❌ Extraction failed - directory not found"
-            ls -la /tmp/tailscale-extract
-            exit 1
-          fi
-          
-          # Copy binaries to system path
-          sudo cp "$EXTRACT_DIR/tailscale" "$TS_DIR/tailscale"
-          sudo cp "$EXTRACT_DIR/tailscaled" "$TS_DIR/tailscaled"
-          sudo chmod +x "$TS_DIR/tailscale" "$TS_DIR/tailscaled"
-          
-          echo "  ✓ Tailscale installed: $TS_DIR/tailscale"
-          echo "  ✓ Tailscaled installed: $TS_DIR/tailscaled"
-          
-          # Verify
-          $TS_DIR/tailscale version
-          
-          echo "ts_path=$TS_DIR/tailscale" >> $GITHUB_OUTPUT
-          echo "tsd_path=$TS_DIR/tailscaled" >> $GITHUB_OUTPUT
+          echo "ts_path=$TS_BIN" >> $GITHUB_OUTPUT
+          echo "tsd_path=$TSD_BIN" >> $GITHUB_OUTPUT
 
       - name: Network configuration for macOS
         run: |
@@ -175,16 +154,15 @@ jobs:
           echo "[*] NETWORK CONFIGURATION"
           
           echo "  [+] Optimizing network stack..."
-          # Best-effort TCP optimizations
           sudo sysctl -w net.inet.tcp.delayed_ack=0 2>/dev/null || true
           sudo sysctl -w net.inet.tcp.mssdflt=1440 2>/dev/null || true
-          echo "  ✓ TCP optimized"
+          echo "  ✓ TCP tuned"
           
           echo "  [+] Testing connectivity..."
           if ping -c 3 -t 10 8.8.8.8 &> /dev/null; then
-            echo "  ✓ Internet connectivity: ONLINE"
+            echo "  ✓ Internet: ONLINE"
           else
-            echo "  ! Internet connectivity: OFFLINE (proceeding anyway)"
+            echo "  ! Internet: OFFLINE (proceeding)"
           fi
           
           echo "  [+] Network interfaces:"
@@ -202,17 +180,17 @@ jobs:
           TS_BIN="${{ steps.ts_install.outputs.ts_path }}"
           TSD_BIN="${{ steps.ts_install.outputs.tsd_path }}"
           
-          # Clean up any previous runs
+          # Clean up leftovers
           sudo pkill -9 tailscaled 2>/dev/null || true
           sudo pkill -9 Tailscale 2>/dev/null || true
           sleep 3
           
-          # Create required directories
+          # Create necessary directories
           sudo mkdir -p /var/lib/tailscale /var/run/tailscale 2>/dev/null || true
           
           echo "  [+] Launching tailscaled (userspace networking)..."
           
-          # Use userspace-networking to avoid kernel extension requirement
+          # Userspace mode avoids kernel extension issues on macOS runners
           sudo $TSD_BIN \
             --state=/var/lib/tailscale/tailscaled.state \
             --socket=/var/run/tailscale/tailscaled.sock \
@@ -223,7 +201,7 @@ jobs:
           TSD_PID=$!
           echo "  ✓ tailscaled PID: $TSD_PID"
           
-          # Wait for the socket to appear, checking process health
+          # Wait for the socket to appear (with process health checks)
           echo "  [+] Waiting for daemon socket..."
           SOCKET_READY=false
           
@@ -234,27 +212,23 @@ jobs:
               break
             fi
             
-            # Check if tailscaled is still running
+            # Check if tailscaled is still alive
             if ! kill -0 $TSD_PID 2>/dev/null; then
-              echo "  ⚠ tailscaled died unexpectedly, restarting..."
+              echo "  ⚠ tailscaled died, restarting..."
               cat /tmp/tailscaled.log
               
-              # Restart with more permissive options
               sudo $TSD_BIN \
                 --state=/var/lib/tailscale/tailscaled.state \
                 --socket=/var/run/tailscale/tailscaled.sock \
                 --port=${{ env.TS_PORT }} \
                 --tun=userspace-networking \
-                --no-logs-no-support \
                 > /tmp/tailscaled_restart.log 2>&1 &
-              
               TSD_PID=$!
               sleep 5
             else
               sleep 2
             fi
             
-            # Show progress every 5 attempts
             if [ $((i % 5)) -eq 0 ]; then
               echo "  ~ Waiting... ($i/30)"
             fi
@@ -279,26 +253,23 @@ jobs:
           TS_KEY="${{ secrets.TS_KEY }}"
           MODE="${{ github.event.inputs.exit_node_mode || 'performance' }}"
           
-          echo "  [+] Connecting with mode: $MODE"
+          echo "  Mode: $MODE"
           
-          # Build connection args
+          # Build args based on selected mode
           CONNECT_ARGS="--accept-routes --accept-dns=true"
-          
           case "$MODE" in
             "performance"|"smooth")
-              CONNECT_ARGS="$CONNECT_ARGS --advertise-exit-node"
-              ;;
+              CONNECT_ARGS="$CONNECT_ARGS --advertise-exit-node" ;;
             "balanced")
-              CONNECT_ARGS="$CONNECT_ARGS --advertise-routes=0.0.0.0/0"
-              ;;
+              CONNECT_ARGS="$CONNECT_ARGS --advertise-routes=0.0.0.0/0" ;;
             "relay-only")
-              # No extra advertise
+              # nothing extra
               ;;
           esac
           
           echo "  Args: $CONNECT_ARGS"
           
-          # Try connection with retries
+          # Connection attempts with daemon health checks
           for attempt in $(seq 1 10); do
             echo "  [+] Connection attempt $attempt..."
             
@@ -314,7 +285,7 @@ jobs:
               echo "  ~ Attempt $attempt failed, retrying in 10s..."
               sleep 10
               
-              # Check daemon health
+              # Daemon health check
               if ! sudo $TS_BIN --socket=/var/run/tailscale/tailscaled.sock status &>/dev/null; then
                 echo "  ! Daemon unhealthy, restarting..."
                 sudo pkill -9 tailscaled 2>/dev/null || true
@@ -330,8 +301,8 @@ jobs:
             fi
           done
           
-          # Wait for stable connection
-          echo "  [+] Waiting for stable connection..."
+          # Allow time for routes to settle
+          echo "  [+] Waiting for routes..."
           sleep 20
           
           # Retrieve IP
@@ -372,7 +343,7 @@ jobs:
           
           TS_BIN="${{ steps.ts_install.outputs.ts_path }}"
           
-          echo "  [+] Checking Tailscale status..."
+          echo "  [+] Tailscale status:"
           sudo $TS_BIN --socket=/var/run/tailscale/tailscaled.sock status 2>&1
           
           TS_IP=$(sudo $TS_BIN --socket=/var/run/tailscale/tailscaled.sock ip -4 2>/dev/null)
@@ -403,7 +374,7 @@ jobs:
           echo "TS IP:         $TS_IP"
           echo "RDP User:      $RDP_USER"
           echo "Status:        READY"
-          echo "Platform:      macOS (Headless CLI)"
+          echo "Platform:      macOS (headless)"
           echo ""
           
           FAIL_COUNT=0
@@ -418,9 +389,9 @@ jobs:
             MINUTES=$(((ELAPSED % 3600) / 60))
             UPTIME=$(printf "%dh %02dm" $HOURS $MINUTES)
             
-            # Check if tailscaled is running
+            # Check daemon process
             if pgrep -f tailscaled >/dev/null 2>&1; then
-              # Check connected status
+              # Check login state
               if sudo $TS_BIN --socket=/var/run/tailscale/tailscaled.sock status 2>&1 | grep -q "logged in"; then
                 TS_CHECK=$(sudo $TS_BIN --socket=/var/run/tailscale/tailscaled.sock ip -4 2>/dev/null)
                 
@@ -451,7 +422,6 @@ jobs:
               echo "[$TIMESTAMP] 🔄 Auto-recovery initiated..."
               RECOVERY_COUNT=$((RECOVERY_COUNT + 1))
               
-              # Kill and restart daemon
               sudo pkill -9 tailscaled 2>/dev/null || true
               sleep 3
               
@@ -464,7 +434,6 @@ jobs:
               
               sleep 10
               
-              # Reconnect
               sudo $TS_BIN \
                 --socket=/var/run/tailscale/tailscaled.sock \
                 up \
@@ -479,16 +448,15 @@ jobs:
               echo "[$TIMESTAMP] ✓ Recovery complete"
             fi
             
-            # Exit before 6‑hour timeout (350 minutes to be safe)
+            # Graceful exit before 6‑hour timeout (350 minutes)
             if [ $ELAPSED -ge 21000 ]; then
               echo ""
               echo "════════════════════════════════════════════════════════"
               echo "  TIMEOUT APPROACHING – GRACEFUL EXIT"
               echo "════════════════════════════════════════════════════════"
-              echo "  Sessions stats:"
-              echo "    Uptime:       $UPTIME"
-              echo "    Health checks: $HEALTH_COUNT"
-              echo "    Recoveries:    $RECOVERY_COUNT"
+              echo "  Uptime:       $UPTIME"
+              echo "  Health checks: $HEALTH_COUNT"
+              echo "  Recoveries:    $RECOVERY_COUNT"
               break
             fi
             
@@ -518,16 +486,16 @@ jobs:
             echo "Exit Node Details:"
             echo "  Name:       $NAME"
             echo "  IP:         $IP"
-            echo "  Platform:   macOS (headless)"
+            echo "  Platform:   macOS (headless CLI)"
             echo ""
             echo "Connect to this exit node:"
             echo "  tailscale up --exit-node=$IP"
             echo ""
             echo "Active Features:"
-            echo "  ✓ Native CLI (no GUI dependencies)"
+            echo "  ✓ Official installer (no App Store)"
             echo "  ✓ Userspace networking (no kernel extension)"
             echo "  ✓ 24/7 monitoring & auto-recovery"
-            echo "  ✓ Multi-mode support"
+            echo "  ✓ Multi-mode: performance/smooth/balanced/relay"
             echo "  ✓ Enterprise credentials"
             echo "  ✓ Fully headless operation"
           else
