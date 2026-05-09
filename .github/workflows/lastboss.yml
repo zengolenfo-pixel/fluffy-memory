@@ -46,14 +46,28 @@ jobs:
           Start-Sleep -Seconds 5
           $TS_IP = & $tsExe.FullName ip -4
 
-          # SOCKS5 proxy (gost)
-          Write-Host ">>> Installing SOCKS5 proxy..."
-          Invoke-WebRequest -Uri "https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.tar.gz" -OutFile "$env:TEMP\gost.tar.gz"
-          tar -xzf "$env:TEMP\gost.tar.gz" -C "$env:TEMP"
-          Move-Item "$env:TEMP\gost" -Destination "C:\Windows\System32\gost.exe" -Force
+          # ----------------------------------------------
+          # FIXED: Download Windows version of gost
+          # ----------------------------------------------
+          Write-Host ">>> Installing SOCKS5 proxy (gost for Windows)..."
+          $gostUrl = "https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-windows-amd64-2.11.5.zip"
+          $zipPath = "$env:TEMP\gost.zip"
+          Invoke-WebRequest -Uri $gostUrl -OutFile $zipPath -UseBasicParsing
+          Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\gost" -Force
+          # The zip contains gost.exe directly
+          Move-Item "$env:TEMP\gost\gost.exe" -Destination "C:\Windows\System32\gost.exe" -Force
+          
+          # Firewall rule for SOCKS5 port
+          netsh advfirewall firewall delete rule name="SOCKS5" 2>$null
           netsh advfirewall firewall add rule name="SOCKS5" dir=in action=allow protocol=TCP localport=1080
-          Start-Process -NoNewWindow gost.exe -ArgumentList "-L socks5://:1080"
+          
+          # Start SOCKS5 proxy (listens on 0.0.0.0:1080, no auth)
+          Start-Process -NoNewWindow "C:\Windows\System32\gost.exe" -ArgumentList "-L socks5://:1080"
+          Write-Host "✅ SOCKS5 proxy started on port 1080"
 
+          # ----------------------------------------------
+          # Final output
+          # ----------------------------------------------
           Write-Host "========================================="
           Write-Host "✅✅✅ FINAL WORKING SETUP ✅✅✅"
           Write-Host "Tailscale IP (use as proxy server): $TS_IP"
@@ -68,9 +82,10 @@ jobs:
           Write-Host "💻 RDP: $TS_IP`:3389  |  User: $USER  |  Pass: $PASS"
           Write-Host "========================================="
 
+          # Watchdog to keep proxy alive
           while ($true) {
               if (-not (Get-Process gost -ErrorAction SilentlyContinue)) {
-                  Start-Process -NoNewWindow gost.exe -ArgumentList "-L socks5://:1080"
+                  Start-Process -NoNewWindow "C:\Windows\System32\gost.exe" -ArgumentList "-L socks5://:1080"
               }
               Write-Host "[$(Get-Date -Format 'HH:mm:ss UTC')] SOCKS5 proxy on $TS_IP:1080"
               Start-Sleep -Seconds 300
