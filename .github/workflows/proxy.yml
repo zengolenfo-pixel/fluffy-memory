@@ -15,10 +15,6 @@ on:
   schedule:
     - cron: '5 */4 * * *'
 
-env:
-  TS_PORT: "41641"
-  HEALTH_CHECK_INTERVAL: "180"
-
 concurrency:
   group: exit-node-windows
   cancel-in-progress: false
@@ -46,60 +42,54 @@ jobs:
           Write-Host "[*] Installing Tailscale..."
           choco install tailscale -y --no-progress
 
-          # Tailscale MSI installs to this fixed path
-          $defaultPath = "C:\Program Files\Tailscale\tailscale.exe"
-          if (Test-Path $defaultPath) {
-            Write-Host "Tailscale found at: $defaultPath"
+          # Default installation path (MSI)
+          if (Test-Path "C:\Program Files\Tailscale\tailscale.exe") {
+            Write-Host "Tailscale found at: C:\Program Files\Tailscale\tailscale.exe"
           } else {
-            # Fallback search in case of rare changes
+            Write-Host "Searching for tailscale.exe..."
             $found = Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($found) {
-              Write-Host "Tailscale found at: $($found.FullName)"
-            } else {
-              Write-Host "ERROR: tailscale.exe not found after installation"
+            if (-not $found) {
+              Write-Host "ERROR: tailscale.exe not found"
               exit 1
             }
+            Write-Host "Tailscale found at: $($found.FullName)"
           }
-          Write-Host "Tailscale version:"
           & "C:\Program Files\Tailscale\tailscale.exe" version
 
       - name: Connect to Tailscale
         id: ts_connect
         run: |
-          # Hardcoded default path + fallback
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $tsExe)) {
             $tsExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
           }
-          if (-not $tsExe) {
-            Write-Host "ERROR: Cannot locate tailscale.exe"
-            exit 1
-          }
-          Write-Host "[*] Connecting to Tailscale using $tsExe"
-
-          # Random hostname
           $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_}))
-
           $mode = "${{ github.event.inputs.exit_node_mode || 'performance' }}"
-          $args = "--accept-routes --accept-dns=true"
-          if ($mode -eq "performance") {
-            $args += " --advertise-exit-node"
-          }
 
-          & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname $args
+          Write-Host "[*] Connecting to Tailscale (using $tsExe)"
+
+          # Build command with explicit, separate arguments – NO splatting
+          if ($mode -eq "performance") {
+            & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --accept-routes --accept-dns=true --advertise-exit-node
+          } else {
+            & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --accept-routes --accept-dns=true
+          }
 
           Start-Sleep -Seconds 20
 
-          # Retrieve IP
+          # Retrieve IP – safely handle errors
           $ip = $null
           for ($i=0; $i -lt 15; $i++) {
-            $ip = (& $tsExe ip -4 2>&1 | Select-Object -First 1).Trim()
-            if ($ip -match "^100\.") { break }
+            $raw = & $tsExe ip -4 2>&1
+            if ($raw -is [string] -and $raw.Trim() -match "^100\.") {
+              $ip = $raw.Trim()
+              break
+            }
             Start-Sleep -Seconds 5
           }
 
-          if (-not $ip -or $ip -notmatch "^100\.") {
-            Write-Host "ERROR: Could not obtain Tailscale IP"
+          if (-not $ip) {
+            Write-Host "ERROR: Could not obtain Tailscale IP. Status:"
             & $tsExe status
             exit 1
           }
@@ -109,16 +99,10 @@ jobs:
 
       - name: 24/7 Monitor & Auto-Recovery
         run: |
-          # Locate tailscale.exe (same logic)
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
           if (-not (Test-Path $tsExe)) {
             $tsExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
           }
-          if (-not $tsExe) {
-            Write-Host "ERROR: Cannot locate tailscale.exe"
-            exit 1
-          }
-
           $ip = "${{ steps.ts_connect.outputs.ts_ip }}"
           $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_}))
           $failCount = 0
@@ -140,6 +124,7 @@ jobs:
             $online = $false
             $statusOut = & $tsExe status 2>&1 | Out-String
 
+            # Node is online if its IP appears and no "offline" on that line
             if ($statusOut -match $ip -and $statusOut -notmatch "offline") {
               $online = $true
             }
@@ -148,19 +133,19 @@ jobs:
               $failCount = 0
               $healthCount++
               Write-Host "[$timestamp] ✅ ONLINE | $ip | Uptime: $uptime | Checks: $healthCount"
-            }
-            else {
+            } else {
               $failCount++
               Write-Host "[$timestamp] ❌ OFFLINE ($failCount/3)"
               if ($failCount -ge 3) {
                 Write-Host "[$timestamp] 🔄 Reconnecting..."
+                # Reconnect with full exit-node flags
                 & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --advertise-exit-node --accept-routes --accept-dns=true
                 $failCount = 0
                 Start-Sleep -Seconds 15
               }
             }
 
-            # Graceful exit before 6‑hour timeout (350 minutes)
+            # Exit before 6‑hour timeout (350 minutes)
             if ($elapsed.TotalSeconds -ge 21000) {
               Write-Host "╔══════════════════════════════════════╗"
               Write-Host "║   TIMEOUT – GRACEFUL SHUTDOWN       ║"
@@ -169,7 +154,7 @@ jobs:
               break
             }
 
-            Start-Sleep -Seconds ${{ env.HEALTH_CHECK_INTERVAL }}
+            Start-Sleep -Seconds 180
           }
 
   summary:
