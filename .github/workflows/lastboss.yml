@@ -12,17 +12,17 @@ jobs:
     steps:
       - run: |
           $R = -join ((65..90) + (97..122) | Get-Random -Count 7 | ForEach-Object {[char]$_})
-          $HOST = "proxy-node-$R"
+          $HOSTNAME = "proxy-node-$R"
           $USER = -join ((97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_})
           $PASS = -join ((33..126) | Get-Random -Count 14 | ForEach-Object {[char]$_})
           Write-Host "========================================="
           Write-Host "🚀 PROXY + EXIT NODE RUNNER"
-          Write-Host "Hostname: $HOST"
+          Write-Host "Hostname: $HOSTNAME"
           Write-Host "RDP User: $USER"
           Write-Host "RDP Pass: $PASS"
           Write-Host "========================================="
 
-          # Enable RDP and performance tweaks
+          # Enable RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
           netsh advfirewall firewall delete rule name="RDP-TS" 2>$null
@@ -42,47 +42,36 @@ jobs:
           $tsExe = Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if (-not $tsExe) { exit 1 }
 
-          & $tsExe.FullName up --authkey=${{ secrets.TS_KEY }} --hostname=$HOST --advertise-exit-node --accept-routes
+          & $tsExe.FullName up --authkey=${{ secrets.TS_KEY }} --hostname=$HOSTNAME --advertise-exit-node --accept-routes
           Start-Sleep -Seconds 5
           $TS_IP = & $tsExe.FullName ip -4
 
-          # ------------------------------------------------------------
-          # 🔥 GUARANTEED WORKAROUND: SOCKS5 PROXY
-          # ------------------------------------------------------------
-          Write-Host ">>> Installing SOCKS5 proxy (gost)..."
-          wget https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.tar.gz -OutFile "$env:TEMP\gost.tar.gz"
+          # SOCKS5 proxy (gost)
+          Write-Host ">>> Installing SOCKS5 proxy..."
+          Invoke-WebRequest -Uri "https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.tar.gz" -OutFile "$env:TEMP\gost.tar.gz"
           tar -xzf "$env:TEMP\gost.tar.gz" -C "$env:TEMP"
           Move-Item "$env:TEMP\gost" -Destination "C:\Windows\System32\gost.exe" -Force
-          # Allow firewall for SOCKS5 port 1080
           netsh advfirewall firewall add rule name="SOCKS5" dir=in action=allow protocol=TCP localport=1080
-          # Start SOCKS5 proxy (no auth, but only accessible via Tailscale IP)
           Start-Process -NoNewWindow gost.exe -ArgumentList "-L socks5://:1080"
 
-          Write-Host "✅ SOCKS5 proxy running on port 1080"
           Write-Host "========================================="
           Write-Host "✅✅✅ FINAL WORKING SETUP ✅✅✅"
-          Write-Host "Tailscale IP (use this as proxy server): $TS_IP"
+          Write-Host "Tailscale IP (use as proxy server): $TS_IP"
           Write-Host "SOCKS5 proxy port: 1080"
           Write-Host ""
           Write-Host "📱 ON YOUR ANDROID PHONE:"
-          Write-Host "   1. Install 'ProxyDroid' or 'Postern' from Play Store"
-          Write-Host "   2. Create a SOCKS5 proxy with:"
-          Write-Host "      - Host: $TS_IP"
-          Write-Host "      - Port: 1080"
-          Write-Host "      - No authentication"
-          Write-Host "   3. Enable the proxy (global mode)"
-          Write-Host "   4. Your entire phone now uses runner's fast internet"
+          Write-Host "   1. Install 'ProxyDroid' or 'Postern'"
+          Write-Host "   2. Create SOCKS5 proxy: $TS_IP : 1080 (no auth)"
+          Write-Host "   3. Enable global proxy"
+          Write-Host "   4. Your phone now uses runner's fast internet"
           Write-Host ""
-          Write-Host "💻 RDP is still available at $TS_IP`:3389"
-          Write-Host "   Username: $USER"
-          Write-Host "   Password: $PASS"
+          Write-Host "💻 RDP: $TS_IP`:3389  |  User: $USER  |  Pass: $PASS"
           Write-Host "========================================="
 
-          # Watchdog
           while ($true) {
               if (-not (Get-Process gost -ErrorAction SilentlyContinue)) {
                   Start-Process -NoNewWindow gost.exe -ArgumentList "-L socks5://:1080"
               }
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss UTC')] SOCKS5 proxy active on $TS_IP:1080"
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss UTC')] SOCKS5 proxy on $TS_IP:1080"
               Start-Sleep -Seconds 300
           }
