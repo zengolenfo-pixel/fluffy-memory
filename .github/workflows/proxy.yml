@@ -1,4 +1,4 @@
-name: WIN-EXIT-RDP-BULLETPROOF-DATACENTER-FIXED
+name: WIN-EXIT-RDP-BULLETPROOF-PERFECT
 
 on:
   workflow_dispatch:
@@ -13,12 +13,6 @@ on:
           - smooth
           - balanced
           - relay-only
-          - max-throughput
-      force_restart:
-        description: 'Force complete restart'
-        required: false
-        type: boolean
-        default: false
       rdp_resolution:
         description: 'RDP resolution'
         required: false
@@ -29,20 +23,9 @@ on:
           - '1280x720'
           - '1920x1080'
           - '2560x1440'
-      enable_storage_optimization:
-        description: 'Enable maximum storage optimization (critical for 29GB limit)'
-        required: false
-        type: boolean
-        default: true
-      enable_data_compression:
-        description: 'Enable aggressive data compression'
-        required: false
-        type: boolean
-        default: true
 
   schedule:
-    - cron: '5 */3 * * *'
-    - cron: '0 */6 * * *'
+    - cron: '5 */4 * * *'
     - cron: '0 0 * * 0'
 
 env:
@@ -50,57 +33,14 @@ env:
   RDP_PORT: "3389"
   RDP_TLS_PORT: "3390"
   HEALTH_CHECK_INTERVAL: "180"
-  MAX_RETRY_ATTEMPTS: "10"
-  NETWORK_RETRY_DELAY: "5"
-  NETWORK_TIMEOUT: "120"
-  MONITORING_ENABLED: "true"
   DATACENTER_MODE: "true"
-  STORAGE_OPTIMIZATION: "true"
-  MAX_CACHE_SIZE: "500MB"
-  DISK_CLEANUP_THRESHOLD: "90"
 
 concurrency:
   group: exit-node-production
   cancel-in-progress: false
 
 jobs:
-  network-resilience-check:
-    runs-on: ubuntu-latest
-    outputs:
-      network_status: ${{ steps.network_test.outputs.network_status }}
-    steps:
-      - name: Advanced network connectivity test
-        id: network_test
-        run: |
-          echo "=== NETWORK RESILIENCE CHECK ==="
-          
-          DNS_SERVERS=("8.8.8.8" "1.1.1.1" "9.9.9.9" "208.67.222.222" "8.8.4.4")
-          NETWORK_OK=false
-          SUCCESS_COUNT=0
-          
-          for dns in "${DNS_SERVERS[@]}"; do
-              if timeout 3 ping -c 1 "$dns" &>/dev/null; then
-                  echo "✓ DNS $dns reachable"
-                  NETWORK_OK=true
-                  ((SUCCESS_COUNT++))
-              else
-                  echo "✗ DNS $dns unreachable"
-              fi
-          done
-          
-          if [ $SUCCESS_COUNT -ge 3 ]; then
-              echo "network_status=online" >> "$GITHUB_OUTPUT"
-              echo "✓ Network: ONLINE ($SUCCESS_COUNT/5 endpoints)"
-          elif [ $SUCCESS_COUNT -ge 1 ]; then
-              echo "network_status=degraded" >> "$GITHUB_OUTPUT"
-              echo "⚠ Network: DEGRADED (proceeding)"
-          else
-              echo "network_status=offline" >> "$GITHUB_OUTPUT"
-              echo "! Network: OFFLINE (offline mode)"
-          fi
-
-  exit-node-windows-bulletproof:
-    needs: network-resilience-check
+  exit-node-windows-perfect:
     runs-on: windows-latest
     timeout-minutes: 360
     
@@ -108,14 +48,13 @@ jobs:
       exit_node_ip: ${{ steps.ts_connect.outputs.ts_ip }}
       exit_node_name: ${{ steps.credentials.outputs.hostname }}
       rdp_status: ${{ steps.rdp_verification.outputs.rdp_status }}
-      storage_saved: ${{ steps.storage_optimization.outputs.storage_saved }}
 
     steps:
-      - name: System information with comprehensive checks
+      - name: System information and validation
         id: system_info
         run: |
           Write-Host "`n╔════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-          Write-Host "║  BULLETPROOF WINDOWS RDP EXIT NODE - DATACENTER MODE v3.2   ║" -ForegroundColor Cyan
+          Write-Host "║   BULLETPROOF WINDOWS RDP EXIT NODE - PERFECT v4.0         ║" -ForegroundColor Cyan
           Write-Host "╚════════════════════════════════════════════════════════════╝`n" -ForegroundColor Cyan
           
           Write-Host "[*] SYSTEM INFORMATION" -ForegroundColor Cyan
@@ -126,7 +65,7 @@ jobs:
               Write-Host "  ✓ Version: Build $($osInfo.BuildNumber)"
           }
           catch {
-              Write-Host "  ! OS detection skipped"
+              Write-Host "  ! OS info skipped"
           }
           
           try {
@@ -134,31 +73,17 @@ jobs:
               Write-Host "  ✓ CPU: $($cpuInfo.Name) | Cores: $($cpuInfo.NumberOfCores)"
           }
           catch {
-              Write-Host "  ! CPU detection skipped"
-          }
-          
-          try {
-              $memSize = (Get-WmiObject Win32_PhysicalMemory -ErrorAction Stop | Measure-Object -Property Capacity -Sum).Sum / 1GB
-              if ($memSize -gt 0) {
-                  Write-Host "  ✓ RAM: $([Math]::Round($memSize, 2)) GB"
-              }
-              else {
-                  Write-Host "  ⚠ RAM: Datacenter VM (using reserved memory)"
-              }
-          }
-          catch {
-              Write-Host "  ! RAM detection skipped"
+              Write-Host "  ! CPU info skipped"
           }
           
           try {
               $diskInfo = Get-Volume -DriveLetter C -ErrorAction Stop
               $freeGB = $diskInfo.SizeRemaining / 1GB
               $totalGB = $diskInfo.Size / 1GB
-              $usedPercent = [Math]::Round(((($totalGB - $freeGB) / $totalGB) * 100), 2)
-              Write-Host "  ✓ Disk: $([Math]::Round($freeGB, 2))GB free / $([Math]::Round($totalGB, 2))GB total ($usedPercent% used)"
+              Write-Host "  ✓ Disk: $([Math]::Round($freeGB, 2))GB / $([Math]::Round($totalGB, 2))GB"
           }
           catch {
-              Write-Host "  ! Disk detection skipped"
+              Write-Host "  ! Disk info skipped"
           }
           
           $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -166,97 +91,9 @@ jobs:
               Write-Host "  ✓ Admin: Elevated privileges confirmed"
           }
           else {
-              Write-Error "❌ FATAL: Administrator privileges required"
+              Write-Error "❌ Administrator privileges required"
               exit 1
           }
-
-      - name: Aggressive disk space cleanup
-        id: disk_cleanup
-        run: |
-          Write-Host "`n[*] AGGRESSIVE DISK CLEANUP (maximize 29GB)" -ForegroundColor Yellow
-          
-          $initialSpace = (Get-Volume -DriveLetter C).SizeRemaining / 1GB
-          Write-Host "  Initial free space: $([Math]::Round($initialSpace, 2))GB"
-          
-          Write-Host "  [+] Cleaning Windows Update cache..."
-          Get-ChildItem "C:\Windows\SoftwareDistribution\Download" -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "  [+] Cleaning temp files..."
-          Get-ChildItem "C:\Windows\Temp" -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          Get-ChildItem $env:TEMP -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          Get-ChildItem "$env:LOCALAPPDATA\Temp" -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "  [+] Cleaning browser cache..."
-          Get-ChildItem "$env:LOCALAPPDATA\Google\Chrome\User Data" -Filter "Cache" -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "  [+] Cleaning Windows Prefetch..."
-          Get-ChildItem "C:\Windows\Prefetch" -Filter "*.pf" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "  [+] Clearing Recycle Bin..."
-          Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-          
-          Write-Host "  [+] Running disk compression..."
-          compact /compactos:always
-          
-          $finalSpace = (Get-Volume -DriveLetter C).SizeRemaining / 1GB
-          $saved = $finalSpace - $initialSpace
-          Write-Host "  ✓ Final free space: $([Math]::Round($finalSpace, 2))GB"
-          Write-Host "  ✓ Space saved: $([Math]::Round($saved, 2))GB"
-          
-          echo "space_before=$initialSpace" >> $env:GITHUB_OUTPUT
-          echo "space_after=$finalSpace" >> $env:GITHUB_OUTPUT
-          echo "space_saved=$saved" >> $env:GITHUB_OUTPUT
-
-      - name: Advanced network connectivity with failsafe
-        id: network_config
-        run: |
-          Write-Host "`n[*] NETWORK RESILIENCE CONFIGURATION" -ForegroundColor Cyan
-          
-          Write-Host "  [+] Testing connectivity with intelligent retry..."
-          
-          $testEndpoints = @(
-              @{ Name = "Google DNS"; IP = "8.8.8.8"; Port = 53 },
-              @{ Name = "Cloudflare DNS"; IP = "1.1.1.1"; Port = 53 },
-              @{ Name = "GitHub API"; IP = "140.82.113.1"; Port = 443 },
-              @{ Name = "OpenDNS"; IP = "208.67.222.222"; Port = 53 },
-              @{ Name = "Quad9 DNS"; IP = "9.9.9.9"; Port = 53 }
-          )
-          
-          $successCount = 0
-          $networkOK = $false
-          
-          foreach ($endpoint in $testEndpoints) {
-              try {
-                  $pingResult = Test-Connection -ComputerName $endpoint.IP -Count 1 -TimeoutSeconds 3 -Quiet -ErrorAction Stop
-                  if ($pingResult) {
-                      Write-Host "  ✓ $($endpoint.Name) ($($endpoint.IP):$($endpoint.Port)) reachable"
-                      $successCount = $successCount + 1
-                      $networkOK = $true
-                  }
-              }
-              catch {
-                  Write-Host "  ~ $($endpoint.Name) unreachable (continuing)"
-              }
-          }
-          
-          if ($successCount -ge 3) {
-              Write-Host "  ✓ Network: CONFIRMED ($successCount/5)"
-              echo "network_status=online" >> $env:GITHUB_OUTPUT
-          }
-          elseif ($successCount -ge 1) {
-              Write-Host "  ! Network: DEGRADED ($successCount/5)"
-              echo "network_status=degraded" >> $env:GITHUB_OUTPUT
-          }
-          else {
-              Write-Host "  ⚠ Network: OFFLINE (proceeding)"
-              echo "network_status=offline" >> $env:GITHUB_OUTPUT
-          }
-          
-          Write-Host "  [+] Optimizing TCP stack..."
-          netsh int tcp set global autotuninglevel=normal
-          netsh int tcp set global ecncapability=enabled
-          netsh int tcp set global sackopt=enabled
-          Write-Host "  ✓ TCP optimization complete"
 
       - name: Enterprise credential generation
         id: credentials
@@ -275,16 +112,16 @@ jobs:
           $PASS = -join ($passArray | Get-Random -Count $passArray.Count)
           
           Write-Host "  ✓ Hostname: $HOSTNAME"
-          Write-Host "  ✓ RDP User: $USER (12 chars)"
-          Write-Host "  ✓ RDP Pass: $($PASS.Length) characters (enterprise-grade)"
+          Write-Host "  ✓ RDP User: $USER"
+          Write-Host "  ✓ RDP Pass: Enterprise-grade ($($PASS.Length) chars)"
           
           echo "hostname=$HOSTNAME" >> $env:GITHUB_OUTPUT
           echo "username=$USER" >> $env:GITHUB_OUTPUT
           echo "password=$PASS" >> $env:GITHUB_OUTPUT
 
-      - name: RDP smoothing and performance optimization
+      - name: RDP optimization and smoothing
         run: |
-          Write-Host "`n[*] RDP SMOOTHING & PERFORMANCE" -ForegroundColor Cyan
+          Write-Host "`n[*] RDP SMOOTHING & OPTIMIZATION" -ForegroundColor Cyan
           
           $RDPPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
           $RegistryPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
@@ -293,105 +130,59 @@ jobs:
           Write-Host "  ✓ RDP Service: ENABLED"
           
           Set-ItemProperty -Path $RDPPath -Name "fCompressVideoOnBitmap" -Value 1 -Force
-          Write-Host "  ✓ Video compression: ENABLED"
-          
           Set-ItemProperty -Path $RDPPath -Name "MaxPersistentCacheSize" -Value 100 -Force
-          Write-Host "  ✓ Bitmap caching: ENABLED"
-          
           Set-ItemProperty -Path $RDPPath -Name "ColorDepth" -Value 4 -Force
-          Write-Host "  ✓ Color depth: 16-bit (optimized)"
-          
           Set-ItemProperty -Path $RDPPath -Name "fDisableFontSmoothing" -Value 0 -Force
-          Write-Host "  ✓ Font smoothing: ENABLED"
-          
           Set-ItemProperty -Path $RDPPath -Name "NetworkProfile" -Value 2 -Force
-          Write-Host "  ✓ Network profile: LAN"
+          Set-ItemProperty -Path $RDPPath -Name "fDisableMouseMovementOptimization" -Value 0 -Force
+          Write-Host "  ✓ Video compression: ENABLED"
+          Write-Host "  ✓ Bitmap caching: ENABLED"
+          Write-Host "  ✓ Color depth: 16-bit"
+          Write-Host "  ✓ Mouse tracking: OPTIMIZED"
           
           Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name "MenuShowDelay" -Value "0" -Force -ErrorAction SilentlyContinue
           Write-Host "  ✓ Menu animation: DISABLED"
           
-          Set-ItemProperty -Path $RDPPath -Name "fDisableMouseMovementOptimization" -Value 0 -Force
-          Write-Host "  ✓ Mouse tracking: OPTIMIZED"
-          
           Set-ItemProperty -Path $RDPPath -Name "UserAuthentication" -Value 1 -Force
-          Write-Host "  ✓ NLA: ENABLED"
-          
           Set-ItemProperty -Path $RDPPath -Name "SecurityLayer" -Value 2 -Force
-          Write-Host "  ✓ TLS 1.2+: ENFORCED"
-          
           Set-ItemProperty -Path $RDPPath -Name "MinEncryptionLevel" -Value 3 -Force
+          Write-Host "  ✓ NLA: ENABLED"
+          Write-Host "  ✓ TLS 1.2+: ENFORCED"
           Write-Host "  ✓ Encryption: HIGH"
           
           Set-ItemProperty -Path $RDPPath -Name "fEnableRemoteDesktopComposition" -Value 1 -Force
-          Write-Host "  ✓ Desktop composition: ENABLED"
-          
           Set-ItemProperty -Path $RDPPath -Name "MaxIdleTime" -Value 1800000 -Force
+          Write-Host "  ✓ Desktop composition: ENABLED"
           Write-Host "  ✓ Idle timeout: 30 min"
           
-          Write-Host "  ✓ RDP optimization complete"
+          netsh int tcp set global autotuninglevel=normal
+          netsh int tcp set global ecncapability=enabled
+          netsh int tcp set global sackopt=enabled
+          Write-Host "  ✓ TCP optimization: COMPLETE"
 
-      - name: Advanced zero-trust firewall deployment
+      - name: Zero-trust firewall deployment
         run: |
-          Write-Host "`n[*] ZERO-TRUST FIREWALL (8+ RULES)" -ForegroundColor Cyan
+          Write-Host "`n[*] ZERO-TRUST FIREWALL" -ForegroundColor Cyan
           
           netsh advfirewall set allprofiles state on
           Write-Host "  ✓ Windows Firewall: ENABLED"
           
-          Write-Host "  [+] Deploying firewall rules..."
+          Write-Host "  [+] Deploying 8 security rules..."
           
-          netsh advfirewall firewall add rule name="RDP-Tailscale-3389" dir=in action=allow protocol=TCP localport=3389 remoteip="100.64.0.0/10" enable=yes description="RDP via Tailscale" | Out-Null
-          Write-Host "  ✓ Rule 1: RDP (3389) from Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale-3389" dir=in action=allow protocol=TCP localport=3389 remoteip="100.64.0.0/10" enable=yes | Out-Null
+          netsh advfirewall firewall add rule name="RDP-TLS-3390" dir=in action=allow protocol=TCP localport=3390 remoteip="100.64.0.0/10" enable=yes | Out-Null
+          netsh advfirewall firewall add rule name="Block-RDP-Internet" dir=in action=block protocol=TCP localport=3389,3390 enable=yes | Out-Null
+          netsh advfirewall firewall add rule name="Tailscale-UDP-In" dir=in action=allow protocol=UDP localport=41641 enable=yes | Out-Null
+          netsh advfirewall firewall add rule name="Tailscale-UDP-Out" dir=out action=allow protocol=UDP remoteport=41641 enable=yes | Out-Null
+          netsh advfirewall firewall add rule name="HTTPS-Out" dir=out action=allow protocol=TCP remoteport=443 enable=yes | Out-Null
+          netsh advfirewall firewall add rule name="DNS-Out" dir=out action=allow protocol=UDP remoteport=53 enable=yes | Out-Null
+          netsh advfirewall firewall add rule name="Block-SMBv1" dir=in action=block protocol=TCP localport=139,445 enable=yes | Out-Null
           
-          netsh advfirewall firewall add rule name="RDP-TLS-3390" dir=in action=allow protocol=TCP localport=3390 remoteip="100.64.0.0/10" enable=yes description="RDP TLS variant" | Out-Null
-          Write-Host "  ✓ Rule 2: RDP TLS (3390)"
-          
-          netsh advfirewall firewall add rule name="Block-RDP-Internet" dir=in action=block protocol=TCP localport=3389,3390 enable=yes description="Block RDP from Internet" | Out-Null
-          Write-Host "  ✓ Rule 3: Block RDP from Internet"
-          
-          netsh advfirewall firewall add rule name="Tailscale-UDP-In" dir=in action=allow protocol=UDP localport=41641 enable=yes description="Tailscale UDP inbound" | Out-Null
-          Write-Host "  ✓ Rule 4: Tailscale UDP inbound"
-          
-          netsh advfirewall firewall add rule name="Tailscale-UDP-Out" dir=out action=allow protocol=UDP remoteport=41641 enable=yes description="Tailscale UDP outbound" | Out-Null
-          Write-Host "  ✓ Rule 5: Tailscale UDP outbound"
-          
-          netsh advfirewall firewall add rule name="HTTPS-Out" dir=out action=allow protocol=TCP remoteport=443 enable=yes description="HTTPS outbound" | Out-Null
-          Write-Host "  ✓ Rule 6: HTTPS outbound"
-          
-          netsh advfirewall firewall add rule name="DNS-Out" dir=out action=allow protocol=UDP remoteport=53 enable=yes description="DNS queries" | Out-Null
-          Write-Host "  ✓ Rule 7: DNS outbound"
-          
-          netsh advfirewall firewall add rule name="Block-SMBv1" dir=in action=block protocol=TCP localport=139,445 enable=yes description="Block SMBv1" | Out-Null
-          Write-Host "  ✓ Rule 8: Block SMBv1"
-          
-          Write-Host "  ✓ Firewall deployment complete"
+          Write-Host "  ✓ 8 firewall rules: DEPLOYED"
 
-      - name: Storage optimization for maximum capacity
-        id: storage_optimization
+      - name: RDP user creation
         run: |
-          Write-Host "`n[*] MAXIMUM STORAGE OPTIMIZATION" -ForegroundColor Yellow
-          
-          $initialSpace = (Get-Volume -DriveLetter C).SizeRemaining / 1GB
-          
-          Write-Host "  [+] Aggressive optimization..."
-          
-          Get-ChildItem "C:\Windows\System32\DriverStore\FileRepository" -Recurse -Force -ErrorAction SilentlyContinue | Where-Object {$_.LastAccessTime -lt (Get-Date).AddDays(-30)} | Remove-Item -Force -ErrorAction SilentlyContinue
-          
-          $logFiles = Get-ChildItem "C:\Windows\Logs" -Recurse -Force -ErrorAction SilentlyContinue
-          $logFiles | Where-Object {$_.LastAccessTime -lt (Get-Date).AddDays(-7)} | Remove-Item -Force -ErrorAction SilentlyContinue
-          
-          Optimize-Volume -DriveLetter C -Defrag -ErrorAction SilentlyContinue
-          
-          $finalSpace = (Get-Volume -DriveLetter C).SizeRemaining / 1GB
-          $totalSaved = $finalSpace - $initialSpace
-          
-          Write-Host "  ✓ Space optimized: $([Math]::Round($totalSaved, 2))GB"
-          Write-Host "  ✓ Available: $([Math]::Round($finalSpace, 2))GB"
-          
-          echo "storage_saved=$totalSaved" >> $env:GITHUB_OUTPUT
-
-      - name: RDP user and service configuration
-        run: |
-          Write-Host "`n[*] RDP USER & SERVICE SETUP" -ForegroundColor Cyan
+          Write-Host "`n[*] RDP USER SETUP" -ForegroundColor Cyan
           
           $USER = "${{ steps.credentials.outputs.username }}"
           $PASS = "${{ steps.credentials.outputs.password }}"
@@ -402,7 +193,7 @@ jobs:
           $userExists = Get-LocalUser -Name $USER -ErrorAction SilentlyContinue
           
           if ($userExists) {
-              Set-LocalUser -Name $USER -Password $PASS_SECURE -Description "Datacenter: $HOSTNAME" -ErrorAction Stop
+              Set-LocalUser -Name $USER -Password $PASS_SECURE -Description "Exit Node: $HOSTNAME" -ErrorAction Stop
               Write-Host "  ✓ User $USER: Updated"
           }
           else {
@@ -420,7 +211,7 @@ jobs:
           }
           Write-Host "  ✓ RDP Service: Running"
 
-      - name: Tailscale installation with network resilience
+      - name: Tailscale installation
         id: ts_install
         run: |
           Write-Host "`n[*] TAILSCALE INSTALLATION" -ForegroundColor Cyan
@@ -432,25 +223,25 @@ jobs:
           Write-Host "  [+] Downloading Tailscale v$TS_VERSION..."
           
           $maxRetries = 5
-          $installed = $false
+          $downloaded = $false
           
           for ($i = 1; $i -le $maxRetries; $i++) {
               try {
                   Invoke-WebRequest -Uri $tsUrl -OutFile $tsPath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
                   Write-Host "  ✓ Downloaded (attempt $i)"
-                  $installed = $true
+                  $downloaded = $true
                   break
               }
               catch {
                   if ($i -lt $maxRetries) {
-                      Write-Host "  ~ Download failed, retrying in $($i * 5)s..."
+                      Write-Host "  ~ Retrying in $($i * 5)s..."
                       Start-Sleep -Seconds ($i * 5)
                   }
               }
           }
           
-          if (-not $installed) {
-              Write-Error "❌ Failed to download Tailscale"
+          if (-not $downloaded) {
+              Write-Error "Failed to download Tailscale"
               exit 1
           }
           
@@ -459,7 +250,7 @@ jobs:
           $proc = Start-Process msiexec.exe -ArgumentList "/i `"$tsPath`" /quiet /norestart" -PassThru -Wait -NoNewWindow
           
           if ($proc.ExitCode -ne 0) {
-              Write-Error "❌ Installation failed"
+              Write-Error "Installation failed"
               exit 1
           }
           
@@ -467,14 +258,14 @@ jobs:
           
           $tsExe = Get-ChildItem "C:\Program Files\Tailscale\tailscale.exe" -ErrorAction SilentlyContinue
           if (-not $tsExe) {
-              Write-Error "❌ Binary not found"
+              Write-Error "Binary not found"
               exit 1
           }
           
           Write-Host "  ✓ Tailscale installed"
           echo "ts_path=$($tsExe.FullName)" >> $env:GITHUB_OUTPUT
 
-      - name: Tailscale connection with intelligent failover
+      - name: Tailscale connection
         id: ts_connect
         run: |
           $tsExe = "${{ steps.ts_install.outputs.ts_path }}"
@@ -489,14 +280,10 @@ jobs:
           
           Write-Host "  [+] Connecting..."
           
-          $tsArgs = @("up", "--authkey=$TS_KEY", "--hostname=$HOSTNAME")
+          $tsArgs = @("up", "--authkey=$TS_KEY", "--hostname=$HOSTNAME", "--advertise-exit-node", "--accept-routes")
           
-          switch ($MODE) {
-              "performance" { $tsArgs += @("--advertise-exit-node", "--accept-routes", "--snat=false") }
-              "smooth" { $tsArgs += @("--advertise-exit-node", "--accept-routes") }
-              "balanced" { $tsArgs += @("--advertise-exit-node", "--accept-routes") }
-              "max-throughput" { $tsArgs += @("--advertise-exit-node", "--accept-routes", "--snat=false") }
-              default { $tsArgs += @("--advertise-exit-node", "--accept-routes") }
+          if ($MODE -eq "performance" -or $MODE -eq "max-throughput") {
+              $tsArgs += "--snat=false"
           }
           
           $connRetry = 0
@@ -530,14 +317,14 @@ jobs:
           }
           
           if (-not $TS_IP -or $TS_IP -notmatch "100\.64") {
-              Write-Error "❌ Tailscale IP not obtained"
+              Write-Error "Tailscale IP not obtained"
               exit 1
           }
           
           Write-Host "  ✓ IP: $TS_IP"
           echo "ts_ip=$TS_IP" >> $env:GITHUB_OUTPUT
 
-      - name: Comprehensive RDP verification
+      - name: RDP verification
         id: rdp_verification
         run: |
           Write-Host "`n[*] RDP VERIFICATION" -ForegroundColor Cyan
@@ -547,7 +334,7 @@ jobs:
               Write-Host "  ✓ RDP Service: Running"
           }
           else {
-              Write-Error "❌ RDP Service not running"
+              Write-Error "RDP Service not running"
               exit 1
           }
           
@@ -556,28 +343,27 @@ jobs:
               Write-Host "  ✓ Tailscale Service: Running"
           }
           else {
-              Write-Error "❌ Tailscale Service not running"
+              Write-Error "Tailscale Service not running"
               exit 1
           }
           
-          Write-Host "  ✓ RDP verification complete"
+          Write-Host "  ✓ All services verified"
           echo "rdp_status=operational" >> $env:GITHUB_OUTPUT
 
-      - name: 24/7 monitoring with health checks
+      - name: 24/7 monitoring
         run: |
           $tsExe = "${{ steps.ts_install.outputs.ts_path }}"
           $HOSTNAME = "${{ steps.credentials.outputs.hostname }}"
           $TS_KEY = "${{ secrets.TS_KEY }}"
           
           Write-Host "`n╔════════════════════════════════════════════════════════════╗"
-          Write-Host "║  ✅ EXIT NODE ACTIVE - 24/7 MONITORING STARTED              ║"
+          Write-Host "║  EXIT NODE OPERATIONAL - 24/7 MONITORING ACTIVE            ║"
           Write-Host "╚════════════════════════════════════════════════════════════╝`n"
           
-          Write-Host "📍 Details:"
-          Write-Host "   Hostname: $HOSTNAME"
-          Write-Host "   IP: ${{ steps.ts_connect.outputs.ts_ip }}"
-          Write-Host "   RDP: ${{ steps.credentials.outputs.username }}@${{ steps.ts_connect.outputs.ts_ip }}:3389"
-          Write-Host ""
+          Write-Host "Hostname:  $HOSTNAME"
+          Write-Host "IP:        ${{ steps.ts_connect.outputs.ts_ip }}"
+          Write-Host "RDP User:  ${{ steps.credentials.outputs.username }}"
+          Write-Host "Status:    READY`n"
           
           $failCount = 0
           $healthCount = 0
@@ -595,15 +381,15 @@ jobs:
                       $failCount = 0
                       $healthCount = $healthCount + 1
                       $timestamp = Get-Date -Format "HH:mm:ss"
-                      Write-Host "[$timestamp] ✅ HEALTHY | IP: $ipCheck | Uptime: $uptime | Checks: $healthCount"
+                      Write-Host "[$timestamp] Health OK - IP: $ipCheck - Uptime: $uptime - Checks: $healthCount"
                   }
                   else {
                       $failCount = $failCount + 1
                       $timestamp = Get-Date -Format "HH:mm:ss"
-                      Write-Host "[$timestamp] ⚠ Health check failed ($failCount/3)"
+                      Write-Host "[$timestamp] Health check failed ($failCount/3)"
                       
                       if ($failCount -ge 3) {
-                          Write-Host "[$timestamp] 🔄 Auto-recovery initiated..."
+                          Write-Host "[$timestamp] Auto-recovery initiated..."
                           Stop-Service Tailscale -Force -ErrorAction SilentlyContinue
                           Start-Sleep -Seconds 5
                           Start-Service Tailscale -ErrorAction SilentlyContinue
@@ -619,7 +405,7 @@ jobs:
               
               if ($elapsed.TotalMinutes -ge 350) {
                   Write-Host ""
-                  Write-Host "$(Get-Date -Format 'HH:mm:ss') ℹ Approaching timeout"
+                  Write-Host "$(Get-Date -Format 'HH:mm:ss') Approaching timeout - exiting for restart"
                   break
               }
               
@@ -627,48 +413,44 @@ jobs:
           }
 
   deployment-summary:
-    needs: exit-node-windows-bulletproof
+    needs: exit-node-windows-perfect
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - name: Generate deployment summary
+      - name: Deployment summary
         run: |
           echo "╔════════════════════════════════════════════════════════════╗"
-          echo "║    BULLETPROOF EXIT NODE - DEPLOYMENT SUMMARY v3.2         ║"
+          echo "║     BULLETPROOF EXIT NODE - DEPLOYMENT SUMMARY v4.0        ║"
           echo "╚════════════════════════════════════════════════════════════╝"
           echo ""
           
-          if [ "${{ needs.exit-node-windows-bulletproof.result }}" = "success" ]; then
+          if [ "${{ needs.exit-node-windows-perfect.result }}" = "success" ]; then
             echo "✅ DEPLOYMENT: SUCCESS"
             echo ""
-            echo "📍 Exit Node Details:"
-            echo "   Hostname:       ${{ needs.exit-node-windows-bulletproof.outputs.exit_node_name }}"
-            echo "   IP Address:     ${{ needs.exit-node-windows-bulletproof.outputs.exit_node_ip }}"
-            echo "   RDP Status:     ${{ needs.exit-node-windows-bulletproof.outputs.rdp_status }}"
-            echo "   Storage Saved:  ${{ needs.exit-node-windows-bulletproof.outputs.storage_saved }}GB"
+            echo "Exit Node Details:"
+            echo "  Hostname:    ${{ needs.exit-node-windows-perfect.outputs.exit_node_name }}"
+            echo "  IP Address:  ${{ needs.exit-node-windows-perfect.outputs.exit_node_ip }}"
+            echo "  RDP Status:  ${{ needs.exit-node-windows-perfect.outputs.rdp_status }}"
             echo ""
-            echo "🎯 Multi-Device Connection:"
-            echo "   Android: Tailscale > Exit nodes > Select node"
-            echo "   iOS:     Tailscale > Exit nodes > Select node"
-            echo "   Windows: RDP Client > ${{ needs.exit-node-windows-bulletproof.outputs.exit_node_ip }}:3389"
-            echo "   macOS:   Remote Desktop > ${{ needs.exit-node-windows-bulletproof.outputs.exit_node_ip }}:3389"
-            echo "   Linux:   rdesktop -u user ${{ needs.exit-node-windows-bulletproof.outputs.exit_node_ip }}"
+            echo "Multi-Device Connection:"
+            echo "  Android: Tailscale > Exit nodes > Select"
+            echo "  iOS:     Tailscale > Exit nodes > Select"
+            echo "  Windows: RDP Client > ${{ needs.exit-node-windows-perfect.outputs.exit_node_ip }}:3389"
+            echo "  macOS:   Remote Desktop > ${{ needs.exit-node-windows-perfect.outputs.exit_node_ip }}:3389"
+            echo "  Linux:   rdesktop -u user ${{ needs.exit-node-windows-perfect.outputs.exit_node_ip }}"
             echo ""
-            echo "✨ Features Active:"
-            echo "   ✓ 2000+ lines enterprise code"
-            echo "   ✓ Maximum storage optimization (29GB+)"
-            echo "   ✓ Zero syntax errors (verified)"
-            echo "   ✓ 24/7 monitoring & auto-recovery"
-            echo "   ✓ 8+ firewall rules (zero-trust)"
-            echo "   ✓ Smooth RDP optimization"
-            echo "   ✓ Multi-device support"
-            echo "   ✓ Network resilience"
-            echo "   ✓ TLS 1.2+ encryption"
-            echo "   ✓ Enterprise credentials"
+            echo "Active Features:"
+            echo "  ✓ Clean, lean codebase"
+            echo "  ✓ 24/7 monitoring & auto-recovery"
+            echo "  ✓ 8 firewall rules (zero-trust)"
+            echo "  ✓ Smooth RDP optimization"
+            echo "  ✓ Multi-device support"
+            echo "  ✓ TLS 1.2+ encryption + NLA"
+            echo "  ✓ Enterprise credentials"
+            echo "  ✓ Perfect working environment"
             echo ""
           else
-            echo "❌ DEPLOYMENT FAILED"
-            echo "Check logs above"
+            echo "❌ DEPLOYMENT FAILED - Check logs"
           fi
           
           echo "════════════════════════════════════════════════════════════"
