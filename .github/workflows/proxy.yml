@@ -1,33 +1,63 @@
-Skip to content
-zengolenfo-pixel
-fluffy-memory
-Repository navigation
-Code
-Issues
-Pull requests
-Agents
-Actions
-Projects
-Wiki
-Security and quality
-Insights
-Settings
-Important update
-On April 24 we'll start using GitHub Copilot interaction data for AI model training unless you opt out. Review this update and manage your preferences in your GitHub account settings.
-Actions: zengolenfo-pixel/fluffy-memory
-Actions
-Management
-.github/workflows/proxy.yml
-Filter workflow runs
-proxy.yml
-2 workflow runs
-Replace Python SOCKS5 proxy with PowerShell implementation
-.github/workflows/proxy.yml #2: Commit dfc8d9b pushed by zengolenfo-pixel
-main	
-now
- Failure
-Fix indentation in proxy.yml workflow
-.github/workflows/proxy.yml #1: Commit 7e11bb5 pushed by zengolenfo-pixel
-main	
-2 minutes ago
- Failure
+name: WIN-EXIT-RDP
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 */5 * * *'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - run: |
+          $R = -join ((65..90) + (97..122) | Get-Random -Count 7 | ForEach-Object {[char]$_})
+          $HOSTNAME = "exit-node-$R"
+          $USER = -join ((97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_})
+          $PASS = -join ((33..126) | Get-Random -Count 14 | ForEach-Object {[char]$_})
+          Write-Host "========================================="
+          Write-Host "TAILSCALE EXIT NODE + RDP"
+          Write-Host "Hostname: $HOSTNAME"
+          Write-Host "RDP User: $USER"
+          Write-Host "RDP Pass: $PASS"
+          Write-Host "========================================="
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          netsh advfirewall firewall add rule name="RDP-TS" dir=in action=allow protocol=TCP localport=3389
+
+          net user $USER $PASS /add /passwordchg:no /expires:never
+          net localgroup Administrators $USER /add
+          net localgroup "Remote Desktop Users" $USER /add
+
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\tailscale.msi" -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\tailscale.msi`" /quiet /norestart" -Wait
+          Start-Sleep -Seconds 10
+
+          $tsExe = Get-ChildItem "C:\Program Files\Tailscale\tailscale.exe" -ErrorAction SilentlyContinue
+          if (-not $tsExe) { Write-Error "Tailscale not found"; exit 1 }
+
+          & $tsExe.FullName up --authkey=${{ secrets.TS_KEY }} --hostname=$HOSTNAME --advertise-exit-node --accept-routes
+          Start-Sleep -Seconds 5
+          $TS_IP = & $tsExe.FullName ip -4
+
+          Write-Host "========================================="
+          Write-Host "SUCCESS - EXIT NODE + RDP READY"
+          Write-Host "Tailscale IP: $TS_IP"
+          Write-Host "RDP: $TS_IP`:3389  |  $USER  |  $PASS"
+          Write-Host "========================================="
+          Write-Host "ANDROID FIX (if exit node doesn't route):"
+          Write-Host "1. Settings > Mobile network > APN > change APN protocol to IPv4 only"
+          Write-Host "2. Tailscale app > Exit node > select '$HOSTNAME'"
+          Write-Host "3. Toggle exit node OFF then ON"
+          Write-Host "========================================="
+
+          while ($true) {
+              $status = & $tsExe.FullName status 2>$null
+              if (-not $status -or $status -notmatch "Connected") {
+                  & $tsExe.FullName up --authkey=${{ secrets.TS_KEY }} --hostname=$HOSTNAME --advertise-exit-node --accept-routes
+              }
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss UTC')] Exit node active on $TS_IP"
+              Start-Sleep -Seconds 300
+          }
