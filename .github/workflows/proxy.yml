@@ -1,135 +1,33 @@
-name: WIN-PROXY-EXIT
-
-on:
-  workflow_dispatch:
-  schedule:
-    - cron: '23 */5 * * *'
-
-jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 360
-    steps:
-      - run: |
-          $R = -join ((65..90) + (97..122) | Get-Random -Count 7 | ForEach-Object {[char]$_})
-          $HOSTNAME = "proxy-node-$R"
-          $USER = -join ((97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_})
-          $PASS = -join ((33..126) | Get-Random -Count 14 | ForEach-Object {[char]$_})
-          Write-Host "========================================="
-          Write-Host "PROXY + EXIT NODE RUNNER"
-          Write-Host "Hostname: $HOSTNAME"
-          Write-Host "RDP User: $USER"
-          Write-Host "RDP Pass: $PASS"
-          Write-Host "========================================="
-
-          # Enable RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          netsh advfirewall firewall delete rule name="RDP-TS" 2>$null
-          netsh advfirewall firewall add rule name="RDP-TS" dir=in action=allow protocol=TCP localport=3389
-
-          # Create RDP user
-          net user $USER $PASS /add /passwordchg:no /expires:never
-          net localgroup Administrators $USER /add
-          net localgroup "Remote Desktop Users" $USER /add
-
-          # Install Tailscale
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile "$env:TEMP\tailscale.msi" -UseBasicParsing
-          Start-Process msiexec.exe -ArgumentList "/i `"$env:TEMP\tailscale.msi`" /quiet /norestart" -Wait
-          Start-Sleep -Seconds 10
-
-          $tsExe = Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $tsExe) { exit 1 }
-
-          & $tsExe.FullName up --authkey=${{ secrets.TS_KEY }} --hostname=$HOSTNAME --advertise-exit-node --accept-routes
-          Start-Sleep -Seconds 5
-          $TS_IP = & $tsExe.FullName ip -4
-
-          # Pure PowerShell SOCKS5 proxy (no external files)
-          $psSocks = @'
-$server = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, 1080)
-$server.Start()
-while ($true) {
-    $client = $server.AcceptTcpClient()
-    $scriptBlock = {
-        param($clientStream, $targetHost, $targetPort)
-        $target = New-Object System.Net.Sockets.TcpClient
-        $target.Connect($targetHost, $targetPort)
-        $targetStream = $target.GetStream()
-        $buffer = New-Object byte[] 8192
-        $timeout = New-Object System.Threading.CancellationTokenSource
-        $task1 = $targetStream.CopyToAsync($clientStream, $buffer, 0, $buffer.Length, $timeout.Token)
-        $task2 = $clientStream.CopyToAsync($targetStream, $buffer, 0, $buffer.Length, $timeout.Token)
-        [System.Threading.Tasks.Task]::WaitAny($task1, $task2)
-        $timeout.Cancel()
-        $clientStream.Close()
-        $targetStream.Close()
-        $target.Close()
-    }
-    $stream = $client.GetStream()
-    $buffer = New-Object byte[] 255
-    $bytesRead = $stream.Read($buffer, 0, 2)
-    if ($bytesRead -eq 2 -and $buffer[0] -eq 5) {
-        $nMethods = $buffer[1]
-        $stream.Read($buffer, 0, $nMethods) | Out-Null
-        $stream.WriteByte(5)
-        $stream.WriteByte(0)
-        $stream.Read($buffer, 0, 4) | Out-Null
-        $cmd = $buffer[1]
-        if ($cmd -eq 1) {
-            $atype = $buffer[3]
-            if ($atype -eq 1) {
-                $stream.Read($buffer, 0, 4) | Out-Null
-                $ip = [System.Net.IPAddress]::new($buffer[0..3])
-                $portBytes = New-Object byte[] 2
-                $stream.Read($portBytes, 0, 2) | Out-Null
-                $port = [System.BitConverter]::ToUInt16($portBytes, 0)
-                $hostStr = $ip.ToString()
-            } elseif ($atype -eq 3) {
-                $len = $stream.ReadByte()
-                $domainBytes = New-Object byte[] $len
-                $stream.Read($domainBytes, 0, $len) | Out-Null
-                $hostStr = [System.Text.Encoding]::ASCII.GetString($domainBytes)
-                $portBytes = New-Object byte[] 2
-                $stream.Read($portBytes, 0, 2) | Out-Null
-                $port = [System.BitConverter]::ToUInt16($portBytes, 0)
-            } else {
-                $client.Close()
-                continue
-            }
-            $reply = [byte[]]@(5,0,0,1,0,0,0,0,0,0)
-            $stream.Write($reply, 0, $reply.Length)
-            $stream.Flush()
-            $job = Start-Job -ScriptBlock $scriptBlock -ArgumentList $stream, $hostStr, $port
-            Start-Sleep -Milliseconds 100
-            $null = $job
-        } else {
-            $client.Close()
-        }
-    } else {
-        $client.Close()
-    }
-}
-'@
-          $psScript = "$env:TEMP\socks.ps1"
-          Set-Content -Path $psScript -Value $psSocks -Encoding ASCII
-          netsh advfirewall firewall delete rule name="SOCKS5-PS" 2>$null
-          netsh advfirewall firewall add rule name="SOCKS5-PS" dir=in action=allow protocol=TCP localport=1080
-          Start-Process -NoNewWindow powershell.exe -ArgumentList "-ExecutionPolicy Bypass -File `"$psScript`""
-          Write-Host "PowerShell SOCKS5 proxy started on port 1080"
-
-          Write-Host "========================================="
-          Write-Host "FINAL WORKING SETUP"
-          Write-Host "Tailscale IP: $TS_IP"
-          Write-Host "SOCKS5 proxy port: 1080"
-          Write-Host "RDP: $TS_IP`:3389  User: $USER  Pass: $PASS"
-          Write-Host "========================================="
-
-          while ($true) {
-              if (-not (Get-Process powershell -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*socks.ps1*" })) {
-                  Start-Process -NoNewWindow powershell.exe -ArgumentList "-ExecutionPolicy Bypass -File `"$psScript`""
-              }
-              Write-Host "[$(Get-Date -Format 'HH:mm:ss UTC')] SOCKS5 proxy on $TS_IP:1080"
-              Start-Sleep -Seconds 300
-          }
+Skip to content
+zengolenfo-pixel
+fluffy-memory
+Repository navigation
+Code
+Issues
+Pull requests
+Agents
+Actions
+Projects
+Wiki
+Security and quality
+Insights
+Settings
+Important update
+On April 24 we'll start using GitHub Copilot interaction data for AI model training unless you opt out. Review this update and manage your preferences in your GitHub account settings.
+Actions: zengolenfo-pixel/fluffy-memory
+Actions
+Management
+.github/workflows/proxy.yml
+Filter workflow runs
+proxy.yml
+2 workflow runs
+Replace Python SOCKS5 proxy with PowerShell implementation
+.github/workflows/proxy.yml #2: Commit dfc8d9b pushed by zengolenfo-pixel
+main	
+now
+ Failure
+Fix indentation in proxy.yml workflow
+.github/workflows/proxy.yml #1: Commit 7e11bb5 pushed by zengolenfo-pixel
+main	
+2 minutes ago
+ Failure
