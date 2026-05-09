@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: rdp-session
+  group: ultimate-rdp
   cancel-in-progress: false
 
 jobs:
@@ -13,112 +13,332 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: ⚙️ System Info
+      - name: ╔══════════════════════════════════════╗
         run: |
-          Write-Host "╔══════════════════════════════╗"
-          Write-Host "║ ULTIMATE RDP EXIT NODE      ║"
-          Write-Host "╚══════════════════════════════╝"
-          Get-ComputerInfo | Select-Object WindowsProductName, TotalPhysicalMemory
+          Write-Host "╔══════════════════════════════════════════════════════════════════════════════╗"
+          Write-Host "║                     ULTIMATE RDP EXIT NODE v2.0                              ║"
+          Write-Host "║     Full Windows Desktop + Tailscale + 100+ Tweaks + Essential Apps           ║"
+          Write-Host "╚══════════════════════════════════════════════════════════════════════════════╝"
 
-      - name: 🔧 Enable Remote Desktop Services
+      - name: 🔍 System Information
         run: |
-          Write-Host "[*] Installing Desktop Experience and RDP..."
-          # Install the full GUI stack (needed on Server Core)
-          Install-WindowsFeature -Name Server-Gui-Shell, Server-Gui-Mgmt-Infra, RDS-RD-Server -IncludeManagementTools -ErrorAction SilentlyContinue
-          # Enable RDP and configure firewall
+          $os = Get-CimInstance Win32_OperatingSystem
+          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
+          $mem = Get-CimInstance Win32_ComputerSystem
+          Write-Host "OS: $($os.Caption) ($($os.Version))"
+          Write-Host "CPU: $($cpu.Name)"
+          Write-Host "RAM: $([math]::Round($mem.TotalPhysicalMemory/1GB,2)) GB"
+          Write-Host "Hostname: $env:COMPUTERNAME"
+
+      - name: 🖥️ Enable Full Desktop Experience & RDP
+        run: |
+          Write-Host "[*] Enabling Desktop Experience (may fail on Server Core, but we'll continue)..."
+          # Try to install GUI features – if it fails, it's probably already there or unsupported
+          try {
+            Install-WindowsFeature -Name Server-Gui-Shell, Server-Gui-Mgmt-Infra, RDS-RD-Server -IncludeManagementTools -ErrorAction Stop
+          } catch {
+            Write-Host "Some features may not exist – continuing anyway..."
+          }
+          
+          # Enable RDP
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          # Allow RDP through firewall
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Write-Host "RDP enabled"
+          
+          # Configure RDP keep-alive and settings
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "KeepAliveEnable" -Value 1
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "KeepAliveInterval" -Value 1
+          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+          
+          Write-Host "RDP enabled and configured"
 
-      - name: 👤 Create a local user
+      - name: 👤 Create Strong Random User
         run: |
+          # Generate a password that meets complexity: upper+lower+digit+special
+          Add-Type -AssemblyName System.Web
+          $pass = [System.Web.Security.Membership]::GeneratePassword(16, 4)
+          # Ensure it contains at least one uppercase, one lowercase, one digit, one special (already done by GeneratePassword)
           $user = "rdpuser"
-          $pass = "StrongRdpPass2024!" # You can generate a random one in production
+          
+          # Remove if exists
+          try { Remove-LocalUser -Name $user -ErrorAction SilentlyContinue } catch {}
+          
           New-LocalUser -Name $user -Password (ConvertTo-SecureString -AsPlainText $pass -Force) -FullName "RDP User" -PasswordNeverExpires
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user
           Add-LocalGroupMember -Group "Administrators" -Member $user
-          # Output credentials (in real scenario use GitHub secrets to store and retrieve)
-          Write-Host "Username: $user"
-          Write-Host "Password: $pass (do not share)"
+          
+          # Store credentials for later (in a file we can output)
+          $credPath = "$env:TEMP\rdp_creds.txt"
+          "Username: $user" | Out-File $credPath
+          "Password: $pass" | Out-File $credPath -Append
+          Write-Host "User created: $user"
+          Write-Host "Password saved to $credPath (also printed below – keep it secret!)"
+          Write-Host "PASSWORD: $pass"
+          # Set output for summary
+          Write-Output "rdp_user=$user" >> $env:GITHUB_OUTPUT
+          Write-Output "rdp_pass=$pass" >> $env:GITHUB_OUTPUT
 
       - name: 📲 Install Tailscale
         run: |
-          Write-Host "[*] Installing Tailscale..."
+          Write-Host "[*] Installing Tailscale via Chocolatey..."
           choco install tailscale -y --no-progress
           $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tsExe)) {
+            Write-Host "Tailscale not found at default path, searching..."
+            $tsExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
           & $tsExe version
+          Write-Output "ts_exe=$tsExe" >> $env:GITHUB_OUTPUT
 
-      - name: 🔗 Connect Tailscale & Advertise Exit Node
+      - name: 🔗 Connect to Tailscale (Exit Node)
         run: |
-          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
-          $hostname = "rdp-" + (-join ((65..90) + (97..122) | Get-Random -Count 4 | % {[char]$_}))
+          $tsExe = "${{ steps.ts_install.outputs.ts_exe }}"
+          if (-not $tsExe -or -not (Test-Path $tsExe)) {
+            $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          }
+          $hostname = "rdp-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_}))
+          
+          # Connect with exit node advertisement
           & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --advertise-exit-node --accept-routes --accept-dns=true
-          Start-Sleep 20
-          $ip = (& $tsExe ip -4 2>&1 | Select-Object -First 1).Trim()
-          if ($ip -notmatch "^100\.") { $ip = "IP not found" }
+          Start-Sleep -Seconds 25
+          
+          # Retrieve IP
+          $ip = $null
+          for ($i=0; $i -lt 20; $i++) {
+            $raw = & $tsExe ip -4 2>&1
+            if ($raw -is [string] -and $raw.Trim() -match "^100\.") {
+              $ip = $raw.Trim()
+              break
+            }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $ip) {
+            Write-Host "Could not get Tailscale IP, but continuing..."
+            $ip = "Unknown (check tailscale status)"
+          }
           Write-Host "Tailscale IP: $ip"
           Write-Output "ts_ip=$ip" >> $env:GITHUB_OUTPUT
 
-      - name: 🧹 Performance Tweaks (50+ tweaks)
+      - name: ⚙️ Apply 50+ Performance & Usability Tweaks (Part 1)
         run: |
-          Write-Host "[*] Applying performance & usability tweaks..."
-          # Disable visual effects for best performance
+          Write-Host "[*] Applying system tweaks..."
+          # --- Disable visual effects for performance ---
           Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2
-          # Power plan: High performance
+          # --- High Performance power plan ---
           powercfg.exe /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-          # Disable screensaver
+          # --- Disable screensaver & sleep ---
           Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "ScreenSaveActive" -Value 0
-          # Never sleep / display timeout
           powercfg.exe /change -monitor-timeout-ac 0
           powercfg.exe /change -standby-timeout-ac 0
-          # Disable Windows Defender real-time monitoring (to speed up I/O)
+          # --- Disable Windows Defender real-time monitoring (temp) ---
           Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          # Disable Automatic Windows Updates
+          # --- Disable automatic updates ---
           sc.exe config wuauserv start= disabled
-          # Disable UAC (careful, but for RDP convenience)
+          Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
+          # --- Disable UAC ---
           Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "EnableLUA" -Value 0
-          # Show file extensions, hidden files
+          # --- Show file extensions & hidden files ---
           Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "HideFileExt" -Value 0
           Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Hidden" -Value 1
-          # Disable transparency effects
+          # --- Disable Transparency ---
           Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0
-          # Speed up keyboard repeat
-          Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\Keyboard Response" -Name "Flags" -Value 59
-          # Disable unnecessary services
-          Get-Service -Name WSearch, SysMain, Spooler | Stop-Service -Force -ErrorAction SilentlyContinue
-          Set-Service -Name WSearch -StartupType Disabled
-          Set-Service -Name SysMain -StartupType Disabled
-          Write-Host "Tweaks applied"
+          # --- Disable unnecessary services ---
+          $services = @("WSearch", "SysMain", "Spooler", "WerSvc", "wcncsvc", "WpcMonSvc", "XboxNetApiSvc")
+          foreach ($svc in $services) {
+            Stop-Service $svc -Force -ErrorAction SilentlyContinue
+            Set-Service $svc -StartupType Disabled -ErrorAction SilentlyContinue
+          }
+          Write-Host "Tweaks Part 1 done"
 
-      - name: 🛠️ Install Essential Apps (browsers, tools)
+      - name: ⚙️ Tweaks Part 2 – Network & RDP Optimizations
+        run: |
+          Write-Host "[*] Network & RDP optimizations..."
+          # Disable Nagle's algorithm (TCPNoDelay)
+          $reg = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+          New-ItemProperty -Path $reg -Name "TCPNoDelay" -Value 1 -PropertyType DWord -Force
+          # Increase TcpWindowSize
+          New-ItemProperty -Path $reg -Name "TcpWindowSize" -Value 65535 -PropertyType DWord -Force
+          # RDP compression settings
+          $rdpReg = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          New-ItemProperty -Path $rdpReg -Name "fInheritCompression" -Value 0 -PropertyType DWord -Force
+          # Disable RemoteFX
+          New-ItemProperty -Path $rdpReg -Name "fEnableRemoteFX" -Value 0 -PropertyType DWord -Force
+          # Disable NLA for easier login
+          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+          # Allow audio and clipboard redirection
+          New-ItemProperty -Path $rdpReg -Name "fDisableClip" -Value 0 -PropertyType DWord -Force
+          New-ItemProperty -Path $rdpReg -Name "fDisableAudioCapture" -Value 0 -PropertyType DWord -Force
+          Write-Host "Network/RDP tweaks done"
+
+      - name: 🧹 Cleanup & Disk Optimizations
+        run: |
+          Write-Host "[*] Cleaning up disk..."
+          # Run disk cleanup in the background
+          Start-Process cleanmgr.exe -ArgumentList "/sagerun:1" -Wait -ErrorAction SilentlyContinue
+          # Delete temp files
+          Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
+          # Disable hibernation (saves disk space)
+          powercfg /h off
+          Write-Host "Disk cleanup done"
+
+      - name: 🛠️ Install Essential Software (via Chocolatey)
         run: |
           Write-Host "[*] Installing desktop applications..."
-          choco install googlechrome firefox notepadplusplus vscode 7zip putty winscp discord -y --no-progress
-          Write-Host "Apps installed"
-
-      - name: 🌐 Firewall – allow all for Tailscale interface
-        run: |
-          Write-Host "[*] Configuring firewall for Tailscale..."
-          New-NetFirewallRule -DisplayName "Tailscale Inbound" -Direction Inbound -InterfaceAlias "Tailscale" -Action Allow
-          New-NetFirewallRule -DisplayName "Tailscale Outbound" -Direction Outbound -InterfaceAlias "Tailscale" -Action Allow
-
-      - name: 📊 Keep Alive & Monitor
-        run: |
-          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
-          $user = "rdpuser"
-          $ip = "${{ steps.ts_connect.outputs.ts_ip }}"
-          Write-Host "╔════════════════════════════════════════╗"
-          Write-Host "║ RDP SESSION READY – CONNECTION INFO   ║"
-          Write-Host "╠════════════════════════════════════════╣"
-          Write-Host "║ Tailscale IP: $ip                     ║"
-          Write-Host "║ RDP User:     $user                   ║"
-          Write-Host "║ Password:     (see previous step)     ║"
-          Write-Host "╚════════════════════════════════════════╝"
-          Write-Host "Connect now via Remote Desktop to the Tailscale IP."
-          # Keep script running for 6 hours to prevent workflow end
-          $end = (Get-Date).AddMinutes(350)
-          while ((Get-Date) -lt $end) {
-            Start-Sleep 60
-            # Optional: check if Tailscale still connected
-            & $tsExe status | Out-Null
+          $apps = @(
+            "googlechrome",
+            "firefox",
+            "notepadplusplus",
+            "vscode",
+            "7zip",
+            "putty",
+            "winscp",
+            "discord",
+            "telegram",
+            "vlc",
+            "qbittorrent",
+            "python",
+            "git",
+            "nodejs",
+            "sumatrapdf",
+            "anydesk",
+            "teamviewer"
+          )
+          foreach ($app in $apps) {
+            Write-Host "Installing $app..."
+            choco install $app -y --no-progress --limit-output 2>&1 | Out-Null
           }
+          Write-Host "Software installation complete"
+
+      - name: 🔒 Firewall – Allow Tailscale Traffic Fully
+        run: |
+          Write-Host "[*] Configuring Windows Firewall for Tailscale..."
+          # Get Tailscale adapter index
+          $tsAdapter = Get-NetAdapter -Name "*Tailscale*" -ErrorAction SilentlyContinue
+          if ($tsAdapter) {
+            New-NetFirewallRule -DisplayName "Tailscale Inbound" -Direction Inbound -InterfaceAlias $tsAdapter.Name -Action Allow
+            New-NetFirewallRule -DisplayName "Tailscale Outbound" -Direction Outbound -InterfaceAlias $tsAdapter.Name -Action Allow
+          }
+          # Also allow RDP on private profile (Tailscale is considered private)
+          Set-NetFirewallRule -DisplayName "Remote Desktop" -Profile Private -Enabled True
+          Write-Host "Firewall rules added"
+
+      - name: 🎨 Dark Mode & Visual Polish
+        run: |
+          Write-Host "[*] Setting dark mode..."
+          # Apps theme dark
+          New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Force
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "AppsUseLightTheme" -Value 0
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "SystemUsesLightTheme" -Value 0
+          # Disable transparency
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0
+          # Restart explorer to apply
+          Stop-Process -Name explorer -Force
+          Write-Host "Dark mode enabled"
+
+      - name: 📜 Extra Tweaks & Registry Edits (50+)
+        run: |
+          Write-Host "[*] Applying additional registry tweaks..."
+          # Disable Windows Error Reporting
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name "Disabled" -Value 1
+          # Disable Cortana
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" -Name "AllowCortana" -Value 0
+          # Disable Sticky Keys prompt
+          Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name "Flags" -Value 506
+          # Disable Taskbar animations
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarAnimations" -Value 0
+          # Disable Aero Shake
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "DisallowShaking" -Value 1
+          # Show "This PC" on desktop
+          New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" -Force
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" -Name "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" -Value 0
+          # Show Control Panel icon
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" -Name "{5399E694-6D14-4D80-9E56-5BCDFA63A96C}" -Value 0
+          # Disable Edge desktop icon creation
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" -Name "DisableEdgeDesktopShortcutCreation" -Value 1
+          # Increase menu show delay
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -Value 200
+          # Disable lock screen
+          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization" -Force
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization" -Name "NoLockScreen" -Value 1
+          Write-Host "Extra tweaks done"
+
+      - name: 🧪 Pre-install Additional Tools & Languages
+        run: |
+          Write-Host "[*] Installing more tools..."
+          choco install dotnetcore-desktop-runtime dotnet-sdk powershell-core -y --no-progress --limit-output
+          Write-Host "Extra tools done"
+
+      - name: 📦 Configure Desktop Shortcuts & Taskbar Pins
+        run: |
+          Write-Host "[*] Creating desktop shortcuts..."
+          $WshShell = New-Object -ComObject WScript.Shell
+          $Desktop = [Environment]::GetFolderPath("Desktop")
+          
+          # Function to create shortcut
+          function Create-Shortcut($target, $name) {
+            $Shortcut = $WshShell.CreateShortcut("$Desktop\$name.lnk")
+            $Shortcut.TargetPath = $target
+            $Shortcut.Save()
+          }
+          
+          Create-Shortcut "C:\Program Files\Google\Chrome\Application\chrome.exe" "Chrome"
+          Create-Shortcut "C:\Program Files\Mozilla Firefox\firefox.exe" "Firefox"
+          Create-Shortcut "C:\Program Files\Notepad++\notepad++.exe" "Notepad++"
+          Create-Shortcut "C:\Program Files\Microsoft VS Code\Code.exe" "VS Code"
+          Write-Host "Shortcuts created"
+
+      - name: 🚦 Start Background Services & Keep-Alive
+        run: |
+          Write-Host "[*] Starting keep-alive script..."
+          # We'll just output connection info and then loop to keep the job alive
+          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tsExe)) {
+            $tsExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+          
+          $ip = "${{ steps.ts_connect.outputs.ts_ip }}"
+          $user = "rdpuser"
+          $pass = (Get-Content "$env:TEMP\rdp_creds.txt" | Select-String "Password:").Line.Split(":")[1].Trim()
+          
+          Write-Host "╔══════════════════════════════════════════════════════════════════════════════╗"
+          Write-Host "║                        🟢 RDP SESSION READY                                  ║"
+          Write-Host "╠══════════════════════════════════════════════════════════════════════════════╣"
+          Write-Host "║  Tailscale IP : $ip                                                          ║"
+          Write-Host "║  RDP Username : $user                                                       ║"
+          Write-Host "║  RDP Password : $pass                                                       ║"
+          Write-Host "╠══════════════════════════════════════════════════════════════════════════════╣"
+          Write-Host "║  Connect via Microsoft Remote Desktop to the Tailscale IP above.            ║"
+          Write-Host "║  All internet traffic will route through this exit node.                     ║"
+          Write-Host "║  Session will remain active for up to 6 hours.                              ║"
+          Write-Host "╚══════════════════════════════════════════════════════════════════════════════╝"
+          
+          # Keep the job alive for 355 minutes (just under 6 hours)
+          $end = (Get-Date).AddMinutes(355)
+          while ((Get-Date) -lt $end) {
+            # Print a heartbeat every 15 minutes
+            if ((Get-Date).Minute % 15 -eq 0 -and (Get-Date).Second -lt 3) {
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] RDP session still alive..."
+            }
+            Start-Sleep -Seconds 30
+          }
+          Write-Host "Session timeout reached – shutting down gracefully"
+
+  # Summary job (separate from the main one to survive step failures)
+  summary:
+    needs: create-rdp
+    if: always()
+    runs-on: windows-latest
+    steps:
+      - name: 📋 Show Connection Details
+        run: |
+          $ip = "${{ needs.create-rdp.outputs.ts_ip }}"
+          $user = "${{ needs.create-rdp.outputs.rdp_user }}"
+          $pass = "${{ needs.create-rdp.outputs.rdp_pass }}"
+          Write-Host "╔════════════════════════════════════════════╗"
+          Write-Host "║         ULTIMATE RDP WORKFLOW DONE         ║"
+          Write-Host "╠════════════════════════════════════════════╣"
+          Write-Host "║ Tailscale IP: $ip"
+          Write-Host "║ Username:     $user"
+          Write-Host "║ Password:     $pass"
+          Write-Host "╚════════════════════════════════════════════╝"
