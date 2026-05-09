@@ -1,78 +1,96 @@
-name: EXIT-RDP
+name: WIN-EXIT-RDP
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 */5 * * *'
+    - cron: '23 */5 * * *'
 
 jobs:
-  start:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: windows-latest
     timeout-minutes: 360
     steps:
       - run: |
-          set -e
-          R=$(head /dev/urandom | tr -dc a-z0-9 | head -c7)
-          HOST="exit-$R"
-          echo "========================================="
-          echo "Starting $HOST"
-          echo "========================================="
+          # Generate random hostname
+          $R = -join ((65..90) + (97..122) | Get-Random -Count 7 | ForEach-Object {[char]$_})
+          $HOST = "win-exit-$R"
+          Write-Host "========================================="
+          Write-Host "Starting $HOST on Windows runner"
+          Write-Host "========================================="
 
-          # Kernel optimisations for Tailscale (UDP)
-          sudo sysctl -w net.ipv4.ip_forward=1
-          sudo sysctl -w net.ipv6.conf.all.forwarding=1
-          sudo sysctl -w net.core.rmem_max=2500000
-          sudo sysctl -w net.core.wmem_max=2500000
-          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr
-          sudo sysctl -w net.core.default_qdisc=fq
+          # ------------------------------
+          # 1. Enable RDP and configure firewall
+          # ------------------------------
+          Write-Host ">>> Enabling RDP..."
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          netsh advfirewall firewall delete rule name="RDP-TS" 2>$null
+          netsh advfirewall firewall add rule name="RDP-TS" dir=in action=allow protocol=TCP localport=3389
 
-          # Install Tailscale
-          curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --authkey=${{ secrets.TS_KEY }} \
-            --hostname="$HOST" \
-            --advertise-exit-node \
-            --accept-routes \
-            --reset
-          TS_IP=$(tailscale ip -4)
+          # ------------------------------
+          # 2. Create RDP user (zygor / 4327)
+          # ------------------------------
+          Write-Host ">>> Creating user zygor (password 4327)..."
+          net user zygor 4327 /add
+          net localgroup Administrators zygor /add
+          net localgroup "Remote Desktop Users" zygor /add
 
-          # Install lightweight desktop (XFCE) and RDP server
-          sudo apt update
-          sudo apt install -y xfce4 xfce4-goodies xrdp
-          echo xfce4-session > ~/.xsession
-          sudo systemctl restart xrdp
+          # ------------------------------
+          # 3. Install Tailscale
+          # ------------------------------
+          Write-Host ">>> Installing Tailscale..."
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installer = "$env:TEMP\tailscale.msi"
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installer -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i `"$installer`" /quiet /norestart" -Wait
+          Start-Sleep -Seconds 10
 
-          # Create user zygor / pass 4327
-          sudo useradd -m -s /bin/bash zygor
-          echo "zygor:4327" | sudo chpasswd
-          sudo usermod -aG sudo,ssl-cert,xrdp zygor
+          # Locate tailscale.exe
+          $tsExe = Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Recurse -Filter "tailscale.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $tsExe) {
+              Write-Error "Tailscale not found"
+              exit 1
+          }
+          Write-Host "Tailscale found at: $($tsExe.FullName)"
 
-          # Optimise RDP for mobile (low bandwidth)
-          sudo sed -i 's/^max_bpp=.*/max_bpp=16/' /etc/xrdp/xrdp.ini
-          sudo sed -i 's/^xserverbpp=.*/xserverbpp=16/' /etc/xrdp/xrdp.ini
-          sudo sed -i 's/^use_compression=.*/use_compression=yes/' /etc/xrdp/xrdp.ini
-          sudo systemctl restart xrdp
+          # ------------------------------
+          # 4. Connect to Tailscale (exit node)
+          # ------------------------------
+          Write-Host ">>> Connecting to Tailscale as exit node..."
+          & $tsExe.FullName up --authkey=${{ secrets.TS_KEY }} --hostname=$HOST --advertise-exit-node --accept-routes
+          Start-Sleep -Seconds 5
+          $TS_IP = & $tsExe.FullName ip -4
+          Write-Host "Tailscale IP: $TS_IP"
 
-          # Firewall – allow RDP only from Tailscale
-          sudo ufw allow from 100.64.0.0/10 to any port 3389 proto tcp
-          echo "y" | sudo ufw enable
+          # ------------------------------
+          # 5. Output connection details
+          # ------------------------------
+          Write-Host "========================================="
+          Write-Host "✅ WINDOWS EXIT NODE + RDP READY"
+          Write-Host "Tailscale node name: $HOST"
+          Write-Host "Tailscale IP:       $TS_IP"
+          Write-Host ""
+          Write-Host "📱 ON YOUR ANDROID PHONE:"
+          Write-Host "   1. Open Tailscale app"
+          Write-Host "   2. Exit node → select '$HOST'"
+          Write-Host "   3. Your phone's internet will use GitHub's fast network"
+          Write-Host "   4. Open Microsoft Remote Desktop app"
+          Write-Host "   5. Connect to $TS_IP`:3389"
+          Write-Host "   6. Username: zygor"
+          Write-Host "   7. Password: 4327"
+          Write-Host "========================================="
 
-          # Display connection info
-          echo "========================================="
-          echo "✅ EXIT NODE + RDP READY"
-          echo "Tailscale node: $HOST"
-          echo "Tailscale IP:   $TS_IP"
-          echo ""
-          echo "📱 ON YOUR PHONE:"
-          echo "   Tailscale app → Exit node → $HOST"
-          echo "   Then RDP to $TS_IP:3389"
-          echo "   Username: zygor"
-          echo "   Password: 4327"
-          echo "========================================="
-
-          # Watchdog – keep alive
-          while true; do
-            tailscale status || sudo tailscale up --authkey=${{ secrets.TS_KEY }} --hostname="$HOST" --advertise-exit-node --accept-routes --reset
-            systemctl is-active xrdp || sudo systemctl restart xrdp
-            echo "[$(date -u +'%H:%M:%S UTC')] $HOST active on $TS_IP"
-            sleep 300
-          done
+          # ------------------------------
+          # 6. Watchdog – keep alive
+          # ------------------------------
+          while ($true) {
+              # Check Tailscale connectivity
+              $status = & $tsExe.FullName status 2>$null
+              if (-not $status -or $status -notmatch "Connected") {
+                  Write-Host "⚠️ Tailscale down – reconnecting..."
+                  & $tsExe.FullName up --authkey=${{ secrets.TS_KEY }} --hostname=$HOST --advertise-exit-node --accept-routes
+                  Start-Sleep -Seconds 5
+              }
+              Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC')] $HOST active on $TS_IP"
+              Start-Sleep -Seconds 300
+          }
