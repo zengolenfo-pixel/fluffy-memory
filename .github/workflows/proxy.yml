@@ -102,13 +102,14 @@ jobs:
             fi
           done
 
-      - name: Enterprise credential generation
+            - name: Enterprise credential generation
         id: credentials
         run: |
           echo ""
           echo "[*] ENTERPRISE CREDENTIAL GENERATION"
           
-          HOSTNAME="mac-$(date +%s | md5 2>/dev/null || date +%s | md5sum | head -c 8)"
+          # Fixed: Use md5 on macOS (not md5sum)
+          HOSTNAME="mac-$(date +%s | md5 | head -c 8)"
           RDP_USER=$(cat /dev/urandom | LC_ALL=C tr -dc 'a-z' | fold -w 12 | head -n 1)
           RDP_PASS=$(cat /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9!@#$%^&*' | fold -w 20 | head -n 1)
           
