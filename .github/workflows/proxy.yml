@@ -46,76 +46,87 @@ jobs:
           Write-Host "[*] Installing Tailscale..."
           choco install tailscale -y --no-progress
 
-          # Refresh PATH so 'tailscale' can be used immediately
-          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-          
-          # Verify
-          Write-Host "Tailscale version:"
-          tailscale version
+          # Tailscale MSI installs to this path by default
+          $tsExe = "C:\Program Files\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tsExe)) {
+            # Fallback: search for tailscale.exe in common locations
+            $tsExe = (Get-ChildItem -Path "C:\Program Files" -Recurse -Filter tailscale.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+          }
+
+          Write-Host "Tailscale executable: $tsExe"
+          & $tsExe version
+
+          # Store the path for later steps
+          Write-Output "ts_exe=$tsExe" >> $env:GITHUB_OUTPUT
 
       - name: Connect to Tailscale
         id: ts_connect
         run: |
-          Write-Host "[*] Connecting to Tailscale..."
-          
+          $tsExe = "${{ steps.ts_install.outputs.ts_exe }}"
+          Write-Host "[*] Connecting to Tailscale using $tsExe"
+
           # Generate a short random hostname
-          $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | % {[char]$_}))
-          
+          $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_}))
+
           $mode = "${{ github.event.inputs.exit_node_mode || 'performance' }}"
-          
+
           $args = "--accept-routes --accept-dns=true"
           if ($mode -eq "performance") {
             $args += " --advertise-exit-node"
           }
-          
-          # Use quotes around authkey to handle any special characters in the secret
-          tailscale up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname $args
-          
+
+          & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname $args
+
           Start-Sleep -Seconds 20
-          
+
           # Retrieve IP
           $ip = $null
           for ($i=0; $i -lt 15; $i++) {
-            $ip = (tailscale ip -4 2>&1 | Select-Object -First 1).Trim()
+            $ip = (& $tsExe ip -4 2>&1 | Select-Object -First 1).Trim()
             if ($ip -match "^100\.") { break }
             Start-Sleep -Seconds 5
           }
-          
+
           if (-not $ip -or $ip -notmatch "^100\.") {
             Write-Host "ERROR: Could not obtain Tailscale IP"
-            tailscale status
+            & $tsExe status
             exit 1
           }
-          
+
           Write-Host "Exit node IP: $ip"
           Write-Output "ts_ip=$ip" >> $env:GITHUB_OUTPUT
 
       - name: 24/7 Monitor & Auto-Recovery
+        env:
+          HEALTH_CHECK_INTERVAL: ${{ env.HEALTH_CHECK_INTERVAL }}
         run: |
-          Write-Host "╔══════════════════════════════════════╗"
-          Write-Host "║   EXIT NODE LIVE – WINDOWS SMOOTH   ║"
-          Write-Host "╚══════════════════════════════════════╝"
-          Write-Host ""
-          
-          $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | % {[char]$_}))
+          $tsExe = "${{ steps.ts_install.outputs.ts_exe }}"
           $ip = "${{ steps.ts_connect.outputs.ts_ip }}"
+          $hostname = "win-" + (-join ((65..90) + (97..122) | Get-Random -Count 6 | ForEach-Object {[char]$_}))
           $failCount = 0
           $healthCount = 0
           $startTime = Get-Date
-          
+
+          Write-Host "╔══════════════════════════════════════╗"
+          Write-Host "║   EXIT NODE LIVE – WINDOWS SMOOTH   ║"
+          Write-Host "╚══════════════════════════════════════╝"
+          Write-Host "Hostname: $hostname"
+          Write-Host "IP: $ip"
+          Write-Host ""
+
           while ($true) {
             $elapsed = (Get-Date) - $startTime
             $uptime = "{0}h {1:D2}m" -f [math]::Floor($elapsed.TotalHours), $elapsed.Minutes
             $timestamp = Get-Date -Format "HH:mm:ss"
-            
+
             $online = $false
-            $statusOut = tailscale status 2>&1 | Out-String
-            
+            $statusOut = & $tsExe status 2>&1 | Out-String
+
             # Check for our node online
             if ($statusOut -match $ip -and $statusOut -notmatch "offline") {
               $online = $true
             }
-            
+
             if ($online) {
               $failCount = 0
               $healthCount++
@@ -126,12 +137,12 @@ jobs:
               Write-Host "[$timestamp] ❌ OFFLINE ($failCount/3)"
               if ($failCount -ge 3) {
                 Write-Host "[$timestamp] 🔄 Reconnecting..."
-                tailscale up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --advertise-exit-node --accept-routes --accept-dns=true
+                & $tsExe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --advertise-exit-node --accept-routes --accept-dns=true
                 $failCount = 0
                 Start-Sleep -Seconds 15
               }
             }
-            
+
             # Exit before 6‑hour timeout (350 minutes)
             if ($elapsed.TotalSeconds -ge 21000) {
               Write-Host "╔══════════════════════════════════════╗"
@@ -140,8 +151,8 @@ jobs:
               Write-Host "Uptime: $uptime | Health checks: $healthCount"
               break
             }
-            
-            Start-Sleep -Seconds ${{ env.HEALTH_CHECK_INTERVAL }}
+
+            Start-Sleep -Seconds $env:HEALTH_CHECK_INTERVAL
           }
 
   summary:
