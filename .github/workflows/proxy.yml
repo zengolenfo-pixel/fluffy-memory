@@ -28,7 +28,6 @@ on:
     - cron: '5 */4 * * *'
 
 env:
-  TAILSCALE_VERSION: "latest"          # Not used for download, just informational
   RDP_PORT: "3389"
   HEALTH_CHECK_INTERVAL: "180"
   TS_PORT: "41641"
@@ -100,26 +99,32 @@ jobs:
           echo "$RDP_PASS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Install Tailscale CLI (headless, no GUI)
+      - name: Install Tailscale CLI (headless, no App Store)
         id: ts_install
         run: |
           echo ""
-          echo "[*] TAILSCALE HEADLESS INSTALLATION (official script, no App Store)"
+          echo "[*] TAILSCALE HEADLESS INSTALLATION (no App Store)"
           
           # Remove previous attempts (GUI or old binaries)
           sudo rm -rf /Applications/Tailscale.app 2>/dev/null || true
           sudo rm -f /usr/local/bin/tailscale /usr/local/bin/tailscaled 2>/dev/null || true
           sudo rm -f /opt/homebrew/bin/tailscale /opt/homebrew/bin/tailscaled 2>/dev/null || true
           
-          # Use the official install script with --no-app flag to get CLI only
-          echo "  [+] Running official installer (no GUI)..."
-          curl -fsSL https://tailscale.com/install.sh | sh -s -- --no-app
+          # First attempt: Homebrew formula (CLI only, no GUI)
+          echo "  [+] Trying Homebrew (tailscale formula)..."
+          if brew install tailscale 2>/dev/null; then
+            echo "  ✓ Installed via Homebrew"
+          else
+            echo "  ! Homebrew failed, using official install script with APP=0..."
+            # Force the script to download static binaries instead of App Store
+            export APP=0
+            curl -fsSL https://tailscale.com/install.sh | sh
+          fi
           
-          # Now locate the installed binaries
+          # Locate the installed binaries
           TS_BIN=""
           TSD_BIN=""
           
-          # Check common paths (Intel and Apple Silicon)
           for dir in /usr/local/bin /opt/homebrew/bin; do
             if [ -x "$dir/tailscale" ]; then
               TS_BIN="$dir/tailscale"
@@ -492,7 +497,7 @@ jobs:
             echo "  tailscale up --exit-node=$IP"
             echo ""
             echo "Active Features:"
-            echo "  ✓ Official installer (no App Store)"
+            echo "  ✓ Installed via Homebrew / direct static binary"
             echo "  ✓ Userspace networking (no kernel extension)"
             echo "  ✓ 24/7 monitoring & auto-recovery"
             echo "  ✓ Multi-mode: performance/smooth/balanced/relay"
