@@ -1,276 +1,473 @@
-name: STEALTH-RDP
+name: STEALTH-RDP-UBUNTU-247
 
 on:
   workflow_dispatch:
   schedule:
-    # Every 5 minutes with a 1‑minute random offset (via script at start)
+    # Every 5 minutes — cron overlap ensures 24/7 coverage
     - cron: '*/5 * * * *'
 
 env:
   TS_PORT: 41641
+  DEBIAN_FRONTEND: noninteractive
 
 concurrency:
-  group: rdp-stealth
-  cancel-in-progress: false   # queue, don't cancel running sessions
+  group: rdp-stealth-ubuntu
+  # DO NOT cancel in-progress — this lets overlapping runs co-exist
+  cancel-in-progress: false
 
 jobs:
+  # ─────────────────────────────────────────────────────────
+  # JOB 1: Disk Reaper — maximizes free space BEFORE main job
+  # ─────────────────────────────────────────────────────────
+  disk-reaper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      space_freed: ${{ steps.reap.outputs.space_freed }}
+    steps:
+      - name: Nuke Unused Packages & Cache
+        id: reap
+        run: |
+          BEFORE=$(df -h / | tail -1 | awk '{print $4}')
+
+          echo "[*] Freeing disk space — before: $BEFORE"
+
+          # Nuke Android SDK (biggest hog ~12GB)
+          sudo rm -rf /usr/local/lib/android 2>/dev/null || true
+
+          # Nuke .NET SDK (~4GB)
+          sudo rm -rf /usr/share/dotnet 2>/dev/null || true
+
+          # Nuke Haskell (~3GB)
+          sudo rm -rf /opt/ghc /usr/local/.ghcup 2>/dev/null || true
+
+          # Nuke CodeQL (~4GB)
+          sudo rm -rf /opt/hostedtoolcache/CodeQL 2>/dev/null || true
+
+          # Nuke Docker images (~5GB)
+          sudo docker system prune -a -f 2>/dev/null || true
+
+          # Nuke swap (~4GB)
+          sudo swapoff -a 2>/dev/null || true
+          sudo rm -f /mnt/swapfile 2>/dev/null || true
+
+          # Nuke tool cache (~6GB)
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+
+          # Nuke apt cache
+          sudo apt-get clean -qq 2>/dev/null || true
+          sudo rm -rf /var/cache/apt/archives/*.deb 2>/dev/null || true
+
+          # Nuke pip / npm cache
+          sudo rm -rf ~/.cache/pip ~/.npm ~/.cargo 2>/dev/null || true
+
+          # Nuke snap cache
+          sudo rm -rf /var/lib/snapd/cache/* 2>/dev/null || true
+
+          # Nuke journal logs
+          sudo journalctl --rotate --vacuum-time=1s 2>/dev/null || true
+
+          # Create a large tmpfs on /mnt for extra workspace
+          sudo mount -t tmpfs -o size=8G tmpfs /mnt 2>/dev/null || true
+
+          AFTER=$(df -h / | tail -1 | awk '{print $4}')
+          echo "[+] Freed space — after: $AFTER"
+          echo "space_freed=$AFTER" >> "$GITHUB_OUTPUT"
+
+  # ─────────────────────────────────────────────────────────
+  # JOB 2: Main RDP Session (ultra-clean, max tweaks)
+  # ─────────────────────────────────────────────────────────
   stealth-rdp:
-    runs-on: windows-latest
+    needs: disk-reaper
+    runs-on: ubuntu-latest
     timeout-minutes: 360
 
     outputs:
-      ts_ip:    ${{ steps.ts_connect.outputs.ts_ip }}
-      rdp_user: ${{ steps.create_user.outputs.rdp_user }}
-      rdp_pass: ${{ steps.create_user.outputs.rdp_pass }}
+      ts_ip:     ${{ steps.ts_connect.outputs.ts_ip }}
+      rdp_user:  ${{ steps.create_user.outputs.rdp_user }}
+      rdp_pass:  ${{ steps.create_user.outputs.rdp_pass }}
 
     steps:
-      # ──────────────────────────  1. Random delay to avoid patterns  ──────────────────────────
-      - name: Random Jitter (0‑120 seconds)
+      # ── 1. Full Random Jitter (30–300s) ──
+      - name: Random Jitter
         run: |
-          $delay = Get-Random -Minimum 0 -Maximum 120
-          Write-Host "Sleeping $delay sec..."
-          Start-Sleep -Seconds $delay
+          delay=$(( RANDOM % 271 + 30 ))
+          echo "[*] Jitter delay: ${delay}s"
+          sleep $delay
 
-      # ──────────────────────────  2. System Info  ──────────────────────────
+      # ── 2. System Info ──
       - name: System Info
         run: |
-          $os  = Get-CimInstance Win32_OperatingSystem
-          $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-          $mem = Get-CimInstance Win32_ComputerSystem
-          Write-Host "OS:   $($os.Caption) ($($os.Version))"
-          Write-Host "CPU:  $($cpu.Name)"
-          Write-Host "RAM:  $([math]::Round($mem.TotalPhysicalMemory/1GB,2)) GB"
-          Write-Host "Host: $env:COMPUTERNAME"
+          echo "OS: $(lsb_release -ds)"
+          echo "Kernel: $(uname -r)"
+          echo "CPU: $(nproc --all) cores"
+          mem=$(free -h | grep Mem | awk '{print $2}')
+          echo "RAM: $mem"
+          echo "Disk: $(df -h / | tail -1 | awk '{print $4}') free"
+          echo "Host: $(hostname)"
+          echo "Arch: $(uname -m)"
 
-      # ──────────────────────────  3. Enable RDP (all security off for convenience)  ────────
-      - name: Enable RDP
+      # ── 3. Install Modern GNOME Desktop + xrdp ──
+      - name: Install GNOME Desktop & xrdp
+        id: xrdp_setup
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name KeepAliveEnable    -Value 1
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name KeepAliveInterval  -Value 1
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 0
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name SecurityLayer       -Value 0
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name MinEncryptionLevel   -Value 1
+          sudo apt-get update -qq
 
-      # ──────────────────────────  4. Create RDP user (strong random password)  ────────────
+          # Minimal Ubuntu desktop (GNOME) — no bloatware
+          sudo apt-get install -y -qq ubuntu-desktop-minimal 2>&1 | tail -3
+
+          # xrdp + xorgxrdp for hardware-accelerated RDP
+          sudo apt-get install -y -qq xrdp xorgxrdp dbus-x11 2>&1 | tail -3
+
+          # Configure xrdp to launch GNOME session
+          sudo bash -c 'cat > /etc/xrdp/startwm.sh << EOF
+#!/bin/sh
+export GNOME_SHELL_SESSION_MODE=ubuntu
+export XDG_CURRENT_DESKTOP=ubuntu:GNOME
+export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu:/etc/xdg
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/\$(id -u)/bus
+export \$(dbus-launch)
+test -x /etc/X11/Xsession && exec /etc/X11/Xsession
+EOF'
+
+          # 32-bit color depth for modern GNOME
+          sudo sed -i 's/max_bpp=24/max_bpp=32/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/^port=3389/port=3389/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/^#port=3389/port=3389/' /etc/xrdp/xrdp.ini
+
+          # Add xrdp to ssl-cert
+          sudo usermod -a -G ssl-cert xrdp
+
+          # Allow colord without polkit prompts
+          sudo mkdir -p /etc/polkit-1/localauthority/50-local.d
+          sudo bash -c 'cat > /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla << EOF2
+[Allow Colord all Users]
+Identity=unix-user:*
+Action=org.freedesktop.color-manager.create-device;org.freedesktop.color-manager.create-profile;org.freedesktop.color-manager.delete-device;org.freedesktop.color-manager.delete-profile;org.freedesktop.color-manager.modify-device;org.freedesktop.color-manager.modify-profile
+ResultAny=no
+ResultInactive=no
+ResultActive=yes
+EOF2'
+
+          # User-level xsessionrc
+          mkdir -p ~/.config
+          cat > ~/.xsessionrc << 'EOF3'
+export GNOME_SHELL_SESSION_MODE=ubuntu
+export XDG_CURRENT_DESKTOP=ubuntu:GNOME
+export XDG_CONFIG_DIRS=/etc/xdg/xdg-ubuntu:/etc/xdg
+export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+EOF3
+
+          # Restart xrdp
+          sudo systemctl restart xrdp
+          sudo systemctl enable xrdp
+
+          echo "[+] GNOME Desktop + xrdp installed on port 3389"
+
+      # ── 4. Create Fully Randomized RDP User ──
       - name: Create RDP User
         id: create_user
         run: |
-          $upper   = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'.ToCharArray()
-          $lower   = 'abcdefghijklmnopqrstuvwxyz'.ToCharArray()
-          $digits  = '0123456789'.ToCharArray()
-          $special = '!@#$%^&*()-_=+'.ToCharArray()
-          $all     = $upper + $lower + $digits + $special
-          $chars   = @()
-          $chars  += ($upper   | Get-Random -Count 3)
-          $chars  += ($lower   | Get-Random -Count 3)
-          $chars  += ($digits  | Get-Random -Count 3)
-          $chars  += ($special | Get-Random -Count 3)
-          $chars  += ($all     | Get-Random -Count 4)
-          $pass    = ($chars | Sort-Object { Get-Random }) -join ''
-          $user    = "rdpuser"
-          try { Remove-LocalUser -Name $user -ErrorAction SilentlyContinue } catch {}
-          New-LocalUser -Name $user -Password (ConvertTo-SecureString -AsPlainText $pass -Force) -FullName "RDP User" -PasswordNeverExpires
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $user
-          Add-LocalGroupMember -Group "Administrators"       -Member $user
-          "$pass" | Out-File "$env:TEMP\rdp_pass.txt"
-          Write-Host "USER: $user  PASS: $pass"
-          "rdp_user=$user" | Out-File $env:GITHUB_OUTPUT -Append
-          "rdp_pass=$pass" | Out-File $env:GITHUB_OUTPUT -Append
+          # Password: 16 chars, all 4 categories, fully shuffled
+          CHARS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9!@#$%^&*()-_=+' | head -c16)
+          PASS=$(echo "$CHARS" | fold -w1 | shuf | tr -d '\n')
 
-      # ──────────────────────────  5. Install Tailscale (silent)  ─────────────────────────
+          # Username: random 10-char alphanumeric
+          USER="u$(tr -dc 'a-z0-9' < /dev/urandom | head -c9)"
+
+          # Create user with full sudo + RDP access
+          sudo useradd -m -G sudo -s /bin/bash "$USER" 2>/dev/null
+          echo "$USER:$PASS" | sudo chpasswd
+
+          echo "rdp_user=$USER"  >> "$GITHUB_OUTPUT"
+          echo "rdp_pass=$PASS"  >> "$GITHUB_OUTPUT"
+          echo "$PASS" > /tmp/.rdp_cred
+          echo "[+] User: $USER  Pass: $PASS"
+
+      # ── 5. GNOME Visual Tweaks (Modern Ubuntu Dark Theme) ──
+      - name: Visual Tweaks (Modern GNOME)
+        run: |
+          # Apply settings for the runneradmin user (who xrdp sessions run as)
+          sudo -u runneradmin dbus-launch gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
+          sudo -u runneradmin dbus-launch gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null || true
+          sudo -u runneradmin dbus-launch gsettings set org.gnome.desktop.screensaver idle-activation-enabled false 2>/dev/null || true
+          sudo -u runneradmin dbus-launch gsettings set org.gnome.desktop.interface gtk-theme 'Yaru-dark' 2>/dev/null || true
+          sudo -u runneradmin dbus-launch gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark' 2>/dev/null || true
+          sudo -u runneradmin dbus-launch gsettings set org.gnome.desktop.interface enable-animations false 2>/dev/null || true
+          sudo -u runneradmin dbus-launch gsettings set org.gnome.nautilus.preferences show-hidden-files true 2>/dev/null || true
+          sudo -u runneradmin dbus-launch gsettings set org.gnome.desktop.notifications show-in-lock-screen false 2>/dev/null || true
+          sudo -u runneradmin dbus-launch gsettings set org.gnome.desktop.wm.preferences button-layout ':minimize,maximize,close' 2>/dev/null || true
+
+          echo "[+] Visual tweaks applied"
+
+      # ── 6. Maximum Performance Tweaks ──
+      - name: Maximum Performance Tweaks
+        run: |
+          # Disable ALL unnecessary services
+          for svc in cups-browsed whoopsie ModemManager avahi-daemon \
+                     bluetooth uuidd speech-dispatcher cups; do
+            sudo systemctl disable --now "$svc" 2>/dev/null || true
+          done
+
+          # Kernel tweaks
+          echo "vm.swappiness=10" | sudo tee -a /etc/sysctl.conf
+          echo "net.core.rmem_max=134217728" | sudo tee -a /etc/sysctl.conf
+          echo "net.core.wmem_max=134217728" | sudo tee -a /etc/sysctl.conf
+          echo "net.ipv4.tcp_rmem=4096 87380 134217728" | sudo tee -a /etc/sysctl.conf
+          echo "net.ipv4.tcp_wmem=4096 65536 134217728" | sudo tee -a /etc/sysctl.conf
+          echo "net.ipv4.tcp_congestion_control=bbr" | sudo tee -a /etc/sysctl.conf
+          echo "net.core.default_qdisc=fq" | sudo tee -a /etc/sysctl.conf
+          echo "kernel.numa_balancing=0" | sudo tee -a /etc/sysctl.conf
+          sudo sysctl -p
+
+          # Remove bloatware packages (saves ~6GB)
+          sudo apt-get remove -y -qq --purge \
+            libreoffice* thunderbird* rhythmbox* gnome-games* \
+            transmission* cheese* simple-scan* totem* 2>/dev/null || true
+          sudo apt-get autoremove -y -qq 2>/dev/null || true
+          sudo apt-get clean -qq 2>/dev/null || true
+
+          # Focus follow mouse for RDP usability
+          gsettings set org.gnome.desktop.wm.preferences focus-mode 'sloppy' 2>/dev/null || true
+
+          echo "[+] Performance tweaks applied"
+
+      # ── 7. Install Tailscale ──
       - name: Install Tailscale
         id: ts_install
         run: |
-          choco install tailscale -y --no-progress --limit-output
-          $exe = (Get-ChildItem "C:\Program Files\Tailscale" -Filter tailscale.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
-          if (-not $exe) { $exe = "C:\Program Files\Tailscale\tailscale.exe" }
-          "ts_exe=$exe" | Out-File $env:GITHUB_OUTPUT -Append
-          & $exe version
+          curl -fsSL https://tailscale.com/install.sh | sh
+          echo "[+] Tailscale $(tailscale version)"
 
-      # ──────────────────────────  6. Connect as exit node (random hostname)  ─────────────
-      - name: Connect Tailscale Exit Node
+      # ── 8. Connect Tailscale (Random Hostname, Exit Node) ──
+      - name: Connect Tailscale
         id: ts_connect
         run: |
-          $exe      = "${{ steps.ts_install.outputs.ts_exe }}"
-          $hostname = "rdp-" + (-join ((65..90) + (97..122) | Get-Random -Count 8 | ForEach-Object { [char]$_ }))
-          & $exe up --authkey="${{ secrets.TS_KEY }}" --hostname=$hostname --advertise-exit-node --accept-routes --accept-dns=true
-          Start-Sleep -Seconds 20
-          $ip = $null
-          for ($i = 0; $i -lt 24; $i++) {
-            $raw = & $exe ip -4 2>&1
-            if ($raw -match "^100\.") { $ip = $raw.Trim(); break }
-            Start-Sleep -Seconds 5
-          }
-          if (-not $ip) { $ip = "check-tailscale-status" }
-          Write-Host "Tailscale IP: $ip"
-          "ts_ip=$ip" | Out-File $env:GITHUB_OUTPUT -Append
+          HOSTNAME="n$(tr -dc 'a-z0-9' < /dev/urandom | head -c12)"
+          sudo tailscale up \
+            --authkey="${{ secrets.TS_KEY }}" \
+            --hostname="$HOSTNAME" \
+            --advertise-exit-node \
+            --accept-routes \
+            --accept-dns=true
+          sleep 15
 
-      # ──────────────────────────  7. Performance tweaks  ─────────────────────────────────
-      - name: Performance Tweaks
+          # Poll for IP (up to 2 min)
+          IP=""
+          for i in $(seq 1 30); do
+            RAW=$(tailscale ip -4 2>&1)
+            if echo "$RAW" | grep -qE '^100\.'; then
+              IP=$(echo "$RAW" | tr -d '[:space:]')
+              break
+            fi
+            sleep 4
+          done
+          [ -z "$IP" ] && IP="check-tailscale-status"
+
+          echo "ts_ip=$IP" >> "$GITHUB_OUTPUT"
+          echo "[+] Tailscale IP: $IP"
+
+      # ── 9. Firewall ──
+      - name: Firewall
         run: |
-          powercfg.exe /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-          powercfg.exe /change monitor-timeout-ac 0
-          powercfg.exe /change standby-timeout-ac 0
-          powercfg.exe /change hibernate-timeout-ac 0
-          powercfg /h off
+          sudo ufw allow 3389/tcp 2>/dev/null || true
+          sudo ufw allow in on tailscale0 2>/dev/null || true
+          echo "[+] Firewall rules set"
 
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name VisualFXSetting -Value 2
-          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name ScreenSaveActive -Value 0
-          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name MenuShowDelay    -Value 0
-          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name WaitToKillAppTimeout   -Value 2000
-          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name HungAppTimeout         -Value 2000
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control" -Name WaitToKillServiceTimeout -Value 2000
-
-          $animPath = "HKCU:\Control Panel\Desktop\WindowMetrics"
-          New-Item -Path $animPath -Force | Out-Null
-          Set-ItemProperty -Path $animPath -Name MinAnimate -Value 0
-
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name TaskbarAnimations -Value 0
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name DisallowShaking   -Value 1
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name HideFileExt       -Value 0
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name Hidden            -Value 1
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name EnableTransparency    -Value 0
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name AppsUseLightTheme     -Value 0
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name SystemUsesLightTheme  -Value 0
-
-          $services = @("WSearch","SysMain","WerSvc","wcncsvc","WpcMonSvc","XboxNetApiSvc","DiagTrack","dmwappushservice","MapsBroker","RetailDemo")
-          foreach ($s in $services) {
-            Stop-Service $s -Force -ErrorAction SilentlyContinue
-            Set-Service  $s -StartupType Disabled -ErrorAction SilentlyContinue
-          }
-          sc.exe config wuauserv start= disabled
-          Stop-Service wuauserv -Force -ErrorAction SilentlyContinue
-
-      # ──────────────────────────  8. Network & RDP optimizations  ────────────────────────
-      - name: Network & RDP Optimizations
+      # ── 10. Install Minimal Essential Tools Only ──
+      - name: Install Tools
         run: |
-          $tcp = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
-          Set-ItemProperty -Path $tcp -Name TCPNoDelay          -Value 1    -Type DWord -Force
-          Set-ItemProperty -Path $tcp -Name TcpAckFrequency     -Value 1    -Type DWord -Force
-          Set-ItemProperty -Path $tcp -Name TcpWindowSize       -Value 65535 -Type DWord -Force
-          Set-ItemProperty -Path $tcp -Name GlobalMaxTcpWindowSize -Value 65535 -Type DWord -Force
-          Set-ItemProperty -Path $tcp -Name Tcp1323Opts         -Value 3    -Type DWord -Force
-          Set-ItemProperty -Path $tcp -Name DefaultTTL          -Value 64   -Type DWord -Force
+          sudo apt-get install -y -qq \
+            firefox nano htop curl wget git \
+            python3-pip netcat-openbsd \
+            2>&1 | tail -2
+          echo "[+] Essential tools installed"
 
-          netsh int tcp set global autotuninglevel=normal
-          netsh int tcp set global chimney=disabled
-          netsh int tcp set global ecncapability=disabled
-          netsh int tcp set global timestamps=disabled
-          netsh int tcp set global rss=enabled
-          netsh int tcp set global fastopen=enabled
-
-          $rdp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
-          Set-ItemProperty -Path $rdp -Name fInheritCompression  -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path $rdp -Name fEnableRemoteFX      -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path $rdp -Name fDisableClip         -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path $rdp -Name fDisableAudioCapture -Value 0 -Type DWord -Force
-          Set-ItemProperty -Path $rdp -Name ColorDepth           -Value 4 -Type DWord -Force
-          Set-ItemProperty -Path $rdp -Name fAllowDesktopComposition -Value 1 -Type DWord -Force
-
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" `
-            -Name fEnableVirtualizedGraphics -Value 1 -Type DWord -Force
-
-      # ──────────────────────────  9. Extra registry polish  ─────────────────────────────
-      - name: Registry Polish
-        run: |
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting" -Name Disabled -Value 1
-          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" -Force | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search" -Name AllowCortana -Value 0
-          Set-ItemProperty -Path "HKCU:\Control Panel\Accessibility\StickyKeys" -Name Flags -Value 506
-          New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization" -Force | Out-Null
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization" -Name NoLockScreen -Value 1
-          New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" -Force | Out-Null
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" -Name "{20D04FE0-3AEA-1069-A2D8-08002B30309D}" -Value 0
-          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" -Name DisableEdgeDesktopShortcutCreation -Value 1
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name ClearPageFileAtShutdown -Value 0
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" -Name LargeSystemCache       -Value 0
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\PriorityControl" -Name Win32PrioritySeparation -Value 38
-
-      # ──────────────────────────  10. Install essential software  ──────────────────────
-      - name: Install Software
-        run: |
-          $apps = @(
-            "googlechrome","firefox","notepadplusplus","vscode","7zip",
-            "putty","winscp","telegram","vlc","qbittorrent",
-            "python","git","nodejs","sumatrapdf"
-          )
-          foreach ($app in $apps) {
-            choco install $app -y --no-progress --limit-output 2>&1 | Out-Null
-            Write-Host "Installed: $app"
-          }
-
-      # ──────────────────────────  11. Firewall rules for Tailscale  ────────────────────
-      - name: Firewall Rules
-        run: |
-          $ts = Get-NetAdapter -Name "*Tailscale*" -ErrorAction SilentlyContinue
-          if ($ts) {
-            New-NetFirewallRule -DisplayName "Tailscale-In"  -Direction Inbound  -InterfaceAlias $ts.Name -Action Allow -ErrorAction SilentlyContinue
-            New-NetFirewallRule -DisplayName "Tailscale-Out" -Direction Outbound -InterfaceAlias $ts.Name -Action Allow -ErrorAction SilentlyContinue
-          }
-          Set-NetFirewallRule -DisplayName "Remote Desktop" -Profile Any -Enabled True -ErrorAction SilentlyContinue
-
-      # ──────────────────────────  12. Desktop shortcuts  ───────────────────────────────
+      # ── 11. Desktop Shortcuts (for RDP convenience) ──
       - name: Desktop Shortcuts
         run: |
-          $sh   = New-Object -ComObject WScript.Shell
-          $desk = [Environment]::GetFolderPath("Desktop")
-          $links = @{
-            "Chrome"     = "C:\Program Files\Google\Chrome\Application\chrome.exe"
-            "Firefox"    = "C:\Program Files\Mozilla Firefox\firefox.exe"
-            "Notepad++"  = "C:\Program Files\Notepad++\notepad++.exe"
-            "VS Code"    = "C:\Program Files\Microsoft VS Code\Code.exe"
-            "WinSCP"     = "C:\Program Files (x86)\WinSCP\WinSCP.exe"
-            "PuTTY"      = "C:\Program Files\PuTTY\putty.exe"
-          }
-          foreach ($name in $links.Keys) {
-            if (Test-Path $links[$name]) {
-              $s = $sh.CreateShortcut("$desk\$name.lnk")
-              $s.TargetPath = $links[$name]
-              $s.Save()
-            }
-          }
+          mkdir -p /home/runneradmin/Desktop
+          # Firefox shortcut
+          cat > /home/runneradmin/Desktop/firefox.desktop << 'EOF'
+[Desktop Entry]
+Name=Firefox
+Exec=/usr/bin/firefox
+Type=Application
+Terminal=false
+EOF
+          chmod +x /home/runneradmin/Desktop/firefox.desktop
 
-      # ──────────────────────────  13. Restart Explorer to apply themes  ────────────────
-      - name: Restart Explorer
-        run: Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+          # Terminal shortcut
+          cat > /home/runneradmin/Desktop/terminal.desktop << 'EOF'
+[Desktop Entry]
+Name=Terminal
+Exec=/usr/bin/gnome-terminal
+Type=Application
+Terminal=false
+EOF
+          chmod +x /home/runneradmin/Desktop/terminal.desktop
 
-      # ──────────────────────────  14. Keep‑alive & print credentials  ──────────────────
-      - name: Keep-Alive & Show Credentials
+          # Files shortcut
+          cat > /home/runneradmin/Desktop/files.desktop << 'EOF'
+[Desktop Entry]
+Name=Files
+Exec=/usr/bin/nautilus
+Type=Application
+Terminal=false
+EOF
+          chmod +x /home/runneradmin/Desktop/files.desktop
+
+          sudo chown -R runneradmin:runneradmin /home/runneradmin/Desktop
+
+      # ── 12. ─────────────────────────────────────────────────
+      # KEEP-ALIVE LOOP — runs for full 6 hours with:
+      #   - Tailscale health check + auto-reconnect
+      #   - xrdp health check + auto-restart
+      #   - Disk space monitoring
+      #   - Heartbeat every 10 min
+      # ─────────────────────────────────────────────────────────
+      - name: Keep-Alive (6-Hour Session)
         run: |
-          $ip   = "${{ steps.ts_connect.outputs.ts_ip }}"
-          $user = "${{ steps.create_user.outputs.rdp_user }}"
-          $pass = "${{ steps.create_user.outputs.rdp_pass }}"
-          Write-Host "============================================================"
-          Write-Host "  RDP SESSION READY"
-          Write-Host "  Tailscale IP : $ip"
-          Write-Host "  Username     : $user"
-          Write-Host "  Password     : $pass"
-          Write-Host "  Port         : 3389"
-          Write-Host "  Max uptime   : 6 hours (will auto‑restart)"
-          Write-Host "============================================================"
-          $end = (Get-Date).AddMinutes(350)
-          $heartbeat = (Get-Date).AddMinutes(15)
-          while ((Get-Date) -lt $end) {
-            if ((Get-Date) -ge $heartbeat) {
-              Write-Host "[$(Get-Date -Format 'HH:mm')] alive — $ip"
-              $heartbeat = (Get-Date).AddMinutes(15)
-            }
-            Start-Sleep -Seconds 30
-          }
-          Write-Host "Session ended gracefully."
+          IP="${{ steps.ts_connect.outputs.ts_ip }}"
+          USER="${{ steps.create_user.outputs.rdp_user }}"
+          PASS="${{ steps.create_user.outputs.rdp_pass }}"
 
-  # ──────────────────────────  Summary (always runs)  ────────────────────────────────
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║           UBUNTU GNOME RDP — READY                          ║"
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  Tailscale IP : $IP"
+          echo "║  Username     : $USER"
+          echo "║  Password     : $PASS"
+          echo "║  Port         : 3389"
+          echo "║  Desktop      : GNOME (Ubuntu Modern Dark)"  
+          echo "║  Uptime       : 6 hours (next cron overlaps)"  
+          echo "╠══════════════════════════════════════════════════════════════╣"
+          echo "║  Connect:                                                      ║"
+          echo "║    xfreerdp /v:$IP /u:$USER /p:$PASS /size:1920x1080 /gfx:h264 /network:lan /floatbar:sticky=off"
+          echo "║    remmina -c rdp://$USER:$PASS@$IP:3389"
+          echo "║    mstsc.exe (Windows) -> $IP:3389"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+
+          END=$(date -d '+350 minutes' +%s)
+          HEARTBEAT=$(date -d '+10 minutes' +%s)
+
+          while [ "$(date +%s)" -lt "$END" ]; do
+            # ── Health: Tailscale ──
+            if ! tailscale status 2>&1 | grep -q "Connected"; then
+              echo "[$(date '+%H:%M')] [!] Tailscale disconnected! Reconnecting..."
+              NEW_HOST="n$(tr -dc 'a-z0-9' < /dev/urandom | head -c12)"
+              sudo tailscale up \
+                --authkey="${{ secrets.TS_KEY }}" \
+                --hostname="$NEW_HOST" \
+                --advertise-exit-node \
+                --accept-routes \
+                --accept-dns=true
+              sleep 15
+              NEW_IP=$(tailscale ip -4 2>&1 | tr -d '[:space:]')
+              if echo "$NEW_IP" | grep -qE '^100\.'; then
+                IP=$NEW_IP
+                echo "[$(date '+%H:%M')] [+] Reconnected — new IP: $IP"
+              fi
+            fi
+
+            # ── Health: xrdp ──
+            if ! systemctl is-active --quiet xrdp 2>/dev/null; then
+              echo "[$(date '+%H:%M')] [!] xrdp down! Restarting..."
+              sudo systemctl restart xrdp
+              sleep 3
+              if systemctl is-active --quiet xrdp 2>/dev/null; then
+                echo "[$(date '+%H:%M')] [+] xrdp restored"
+              fi
+            fi
+
+            # ── Health: Disk ──
+            DISK_USE=$(df / | tail -1 | awk '{print $5}' | tr -d '%')
+            if [ "$DISK_USE" -gt 90 ]; then
+              echo "[$(date '+%H:%M')] [!] Disk at ${DISK_USE}% — cleaning..."
+              sudo apt-get clean -qq 2>/dev/null || true
+              sudo journalctl --rotate --vacuum-time=1s 2>/dev/null || true
+              sudo rm -rf /tmp/* 2>/dev/null || true
+            fi
+
+            # ── Heartbeat ──
+            NOW=$(date +%s)
+            if [ "$NOW" -ge "$HEARTBEAT" ]; then
+              DISK=$(df -h / | tail -1 | awk '{print $4}')
+              echo "[$(date '+%H:%M')] alive — $IP — disk: $DISK free"
+              HEARTBEAT=$(date -d '+10 minutes' +%s)
+            fi
+
+            sleep 30
+          done
+
+          echo "[*] Session ended (next cron run will overlap seamlessly)"
+
+      # ── 13. Cleanup (removes all traces) ──
+      - name: Cleanup
+        if: always()
+        run: |
+          USER="${{ steps.create_user.outputs.rdp_user }}"
+
+          # Remove created user
+          sudo userdel -r "$USER" 2>/dev/null || true
+
+          # Remove credentials
+          rm -f /tmp/.rdp_cred
+
+          # Clear journal logs  
+          sudo journalctl --rotate --vacuum-time=1s 2>/dev/null || true
+
+          # Clear apt
+          sudo apt-get clean 2>/dev/null || true
+
+          # Clear bash history
+          history -c 2>/dev/null || true
+          > ~/.bash_history 2>/dev/null || true
+          sudo rm -f /root/.bash_history 2>/dev/null || true
+
+          # Clear temp
+          sudo rm -rf /tmp/* 2>/dev/null || true
+
+          # Disconnect Tailscale  
+          sudo tailscale logout 2>/dev/null || true
+
+          echo "[+] Cleanup complete — no traces left"
+
+  # ─────────────────────────────────────────────────────────
+  # JOB 3: Summary (always runs)
+  # ─────────────────────────────────────────────────────────
   summary:
-    needs: stealth-rdp
+    needs: [disk-reaper, stealth-rdp]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Connection Summary
         run: |
-          echo "=============================="
-          echo "  Tailscale IP : ${{ needs.stealth-rdp.outputs.ts_ip }}"
-          echo "  Username     : ${{ needs.stealth-rdp.outputs.rdp_user }}"
-          echo "  Password     : ${{ needs.stealth-rdp.outputs.rdp_pass }}"
-          echo "=============================="
+          echo "╔══════════════════════════════════════════════╗"
+          echo "║  SESSION DETAILS                             ║"
+          echo "╠══════════════════════════════════════════════╣"
+          echo "║  Tailscale IP : ${{ needs.stealth-rdp.outputs.ts_ip }}"
+          echo "║  Username     : ${{ needs.stealth-rdp.outputs.rdp_user }}"
+          echo "║  Password     : ${{ needs.stealth-rdp.outputs.rdp_pass }}"
+          echo "║  Port         : 3389"
+          echo "║  Space freed  : ${{ needs.disk-reaper.outputs.space_freed }}"
+          echo "╚══════════════════════════════════════════════╝"
+
+  # ─────────────────────────────────────────────────────────
+  # JOB 4: Keep Repository Alive (prevents 60-day cron death)
+  # ─────────────────────────────────────────────────────────
+  keep-alive:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Empty commit to keep cron alive
+        run: |
+          git config user.email "bot@localhost"
+          git config user.name "KeepAlive Bot"
+          git commit --allow-empty -m "chore: keep-alive $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git push
