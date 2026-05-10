@@ -1,4 +1,4 @@
-name: macOS RDP
+name: Ubuntu RDP
 
 on:
   workflow_dispatch:
@@ -67,6 +67,7 @@ jobs:
           XRDPEOF
           sudo chmod 755 /etc/xrdp/startwm.sh
           sudo sed -i 's/#WaylandEnable=false/WaylandEnable=false/' /etc/gdm3/custom.conf 2>/dev/null || true
+          echo "WaylandEnable=false" | sudo tee -a /etc/gdm3/custom.conf 2>/dev/null || true
 
       - name: Polkit fix
         run: |
@@ -80,6 +81,9 @@ jobs:
           sudo sed -i 's/xserverbpp=.*/xserverbpp=24/' /etc/xrdp/xrdp.ini
           sudo sed -i 's/encrypt_level=.*/encrypt_level=high/' /etc/xrdp/xrdp.ini
           sudo sed -i 's/use_vsock=.*/use_vsock=false/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/#bitmap_cache=yes/bitmap_cache=yes/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/#bitmap_compression=yes/bitmap_compression=yes/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/#tcp_nodelay=yes/tcp_nodelay=yes/' /etc/xrdp/xrdp.ini
 
       - name: Create user
         run: |
@@ -87,98 +91,12 @@ jobs:
           echo "${{ steps.creds.outputs.username }}:${{ steps.creds.outputs.password }}" | sudo chpasswd
           echo "${{ steps.creds.outputs.username }} ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/${{ steps.creds.outputs.username }}"
 
-      - name: macOS theme (dconf directly, no dbus-launch)
+      - name: User xsessionrc
         run: |
           U="${{ steps.creds.outputs.username }}"
-          UHOME=$(eval echo ~$U)
-
-          # Create dconf profile directory and set proper ownership
-          mkdir -p "$UHOME/.config/dconf"
-          chown -R "$U:$U" "$UHOME/.config"
-
-          # Direct dconf write via sudo -u (no dbus needed for dconf update)
-          sudo -u "$U" dconf update 2>/dev/null || true
-
-          # Use gsettings via machinectl or direct dconf write
-          # Since dbus isn't available, write dconf database directly
-          cat > /tmp/macos-settings.sh << 'SCRIPT'
-          #!/bin/bash
-          export XDG_RUNTIME_DIR=/run/user/$(id -u)
-          export DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
-
-          # Wait for dbus
-          for i in 1 2 3 4 5; do
-            if [ -S "$XDG_RUNTIME_DIR/bus" ]; then break; fi
-            sleep 1
-          done
-
-          gsettings set org.gnome.desktop.wm.preferences button-layout 'close,minimize,maximize:'
-          gsettings set org.gnome.shell.extensions.dash-to-dock dock-position 'BOTTOM'
-          gsettings set org.gnome.shell.extensions.dash-to-dock autohide false
-          gsettings set org.gnome.shell.extensions.dash-to-dock intellihide false
-          gsettings set org.gnome.shell.extensions.dash-to-dock show-trash false
-          gsettings set org.gnome.shell.extensions.dash-to-dock dash-max-icon-size 48
-          gsettings set org.gnome.shell.extensions.dash-to-dock extend-height false
-          gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
-          gsettings set org.gnome.shell.ubuntu color-scheme 'dark'
-          gsettings set org.gnome.desktop.screensaver lock-enabled false
-          gsettings set org.gnome.desktop.screensaver idle-activation-enabled false
-          gsettings set org.gnome.desktop.session idle-delay 0
-          gsettings set org.gnome.desktop.interface enable-animations false
-          gsettings set org.gnome.desktop.background picture-uri ''
-          gsettings set org.gnome.desktop.background primary-color '#000000'
-          gsettings set org.gnome.desktop.interface clock-show-date true
-          gsettings set org.gnome.desktop.interface clock-show-weekday true
-          SCRIPT
-
-          chmod +x /tmp/macos-settings.sh
-          chown "$U:$U" /tmp/macos-settings.sh
-
-          # Run as user with proper environment
-          sudo -u "$U" XDG_RUNTIME_DIR=/run/user/$(id -u "$U") DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u "$U")/bus bash /tmp/macos-settings.sh 2>/dev/null || true
-
-          # Fallback: write dconf database directly if dbus unavailable
-          sudo -u "$U" mkdir -p "/home/$U/.config/dconf"
-          sudo -u "$U" bash -c 'cat > /home/$U/.config/dconf/user.txt << EOF
-          [org/gnome/desktop/wm/preferences]
-          button-layout="close,minimize,maximize:"
-
-          [org/gnome/shell/extensions/dash-to-dock]
-          dock-position="BOTTOM"
-          autohide=false
-          intellihide=false
-          show-trash=false
-          dash-max-icon-size=48
-          extend-height=false
-
-          [org/gnome/desktop/interface]
-          color-scheme="prefer-dark"
-          enable-animations=false
-          clock-show-date=true
-          clock-show-weekday=true
-
-          [org/gnome/shell/ubuntu]
-          color-scheme="dark"
-
-          [org/gnome/desktop/screensaver]
-          lock-enabled=false
-          idle-activation-enabled=false
-
-          [org/gnome/desktop/session]
-          idle-delay=0
-
-          [org/gnome/desktop/background]
-          picture-uri=""
-          primary-color="#000000"
-          EOF'
-
-      - name: xsessionrc for user
-        run: |
-          U="${{ steps.creds.outputs.username }}"
-          echo "export GNOME_SHELL_SESSION_MODE=ubuntu" > "/home/$U/.xsessionrc"
-          echo "export XDG_CURRENT_DESKTOP=ubuntu:GNOME" >> "/home/$U/.xsessionrc"
-          echo "export XDG_SESSION_TYPE=x11" >> "/home/$U/.xsessionrc"
-          chown "$U:$U" "/home/$U/.xsessionrc"
+          sudo -u "$U" bash -c 'echo "export GNOME_SHELL_SESSION_MODE=ubuntu" > ~/.xsessionrc'
+          sudo -u "$U" bash -c 'echo "export XDG_CURRENT_DESKTOP=ubuntu:GNOME" >> ~/.xsessionrc'
+          sudo -u "$U" bash -c 'echo "export XDG_SESSION_TYPE=x11" >> ~/.xsessionrc'
 
       - name: Restart xrdp
         run: |
@@ -202,7 +120,7 @@ jobs:
           TS_IP="${{ steps.tailscale.outputs.tailscale-ip }}"
 
           echo "═══════════════════════════════════════════"
-          echo "  🍎 macOS RDP RUNNING"
+          echo "  Ubuntu RDP RUNNING"
           echo "═══════════════════════════════════════════"
           echo "  Tailscale: $TS_IP"
           echo "  Username:  $USERNAME"
@@ -224,17 +142,9 @@ jobs:
             done
           " > /dev/null 2>&1 &
 
-          setsid bash -c "
-            export RUNNER_TRACKING_ID=0
-            while true; do
-              sudo -u \"$USERNAME\" XDG_RUNTIME_DIR=/run/user/\$(id -u \"$USERNAME\") /usr/bin/true 2>/dev/null || true
-              sleep 120
-            done
-          " < /dev/null > /dev/null 2>&1 &
-
           END=\$((SECONDS + 52560 * 60))
           while [ \$SECONDS -lt \$END ]; do
             UPTIME=\$((SECONDS / 3600))
-            echo \"[♥] \${UPTIME}h | pid: \$\$ | ts: \$(tailscale ip -4 2>/dev/null)\"
+            echo \"[♥] \${UPTIME}h | ts: \$(tailscale ip -4 2>/dev/null)\"
             sleep 60
           done
