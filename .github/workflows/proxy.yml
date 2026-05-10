@@ -32,14 +32,25 @@ jobs:
           sudo apt-get install -yqq --no-install-recommends xfce4 xfce4-goodies xrdp xorgxrdp dbus-x11 sudo bash
           sudo apt-get clean -qq
 
-      - name: 4. Configure XRDP
+      - name: 4. Configure XRDP (Fix D-Bus Error)
         run: |
           sudo tee /etc/xrdp/startwm.sh > /dev/null << 'EOF'
           #!/bin/sh
+          if [ -r /etc/default/locale ]; then
+            . /etc/default/locale
+            export LANG LANGUAGE
+          fi
+          
+          # This specifically fixes the "failsafe session" error
+          unset DBUS_SESSION_BUS_ADDRESS
+          unset XDG_RUNTIME_DIR
+          
           export XDG_SESSION_DESKTOP=xfce
           export XDG_CURRENT_DESKTOP=XFCE
           export DESKTOP_SESSION=xfce
-          exec startxfce4
+          
+          # Wraps the start command in a new D-Bus session
+          exec dbus-run-session -- startxfce4
           EOF
           
           sudo chmod 755 /etc/xrdp/startwm.sh
@@ -50,7 +61,9 @@ jobs:
         run: |
           sudo useradd -m -s /bin/bash -G sudo "${{ steps.creds.outputs.username }}"
           echo "${{ steps.creds.outputs.username }}:${{ steps.creds.outputs.password }}" | sudo chpasswd
-          echo "xfce4-session" | sudo tee /home/${{ steps.creds.outputs.username }}/.xsession
+          
+          # Force the user profile to use dbus-launch as well
+          echo "exec dbus-launch --exit-with-session startxfce4" | sudo tee /home/${{ steps.creds.outputs.username }}/.xsession
           sudo chown ${{ steps.creds.outputs.username }}:${{ steps.creds.outputs.username }} /home/${{ steps.creds.outputs.username }}/.xsession
 
       - name: 6. Install Tailscale
