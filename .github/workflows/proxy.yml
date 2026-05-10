@@ -9,89 +9,60 @@ env:
   DEBIAN_FRONTEND: noninteractive
 
 jobs:
-  # ──────────────────────────────────────────────
-  # JOB 1: RECLAIM MAX DISK SPACE
-  # ──────────────────────────────────────────────
-  disk-reaper:
+  proxy:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    outputs:
-      username: ${{ steps.gen-creds.outputs.username }}
-      password: ${{ steps.gen-creds.outputs.password }}
-      hostname: ${{ steps.gen-creds.outputs.hostname }}
-      tailscale-ip: ${{ steps.tailscale.outputs.tailscale-ip }}
+    timeout-minutes: 355
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       # ── Generate random credentials ──
-      - name: Generate random credentials
-        id: gen-creds
+      - name: Generate credentials
+        id: creds
         run: |
           echo "username=u$(tr -dc 'a-z0-9' < /dev/urandom | head -c9)" >> "$GITHUB_OUTPUT"
           echo "password=$(tr -dc 'A-Za-z0-9!@#%^&*' < /dev/urandom | head -c16)" >> "$GITHUB_OUTPUT"
           echo "hostname=n$(tr -dc 'a-z0-9' < /dev/urandom | head -c12)" >> "$GITHUB_OUTPUT"
 
-      # ── Maximize build space via LVM ──
-      - name: Maximize build space
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 512
-          temp-reserve-mb: 50
-          swap-size-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
-
-  # ──────────────────────────────────────────────
-  # JOB 2: STEALTH RDP SETUP
-  # ──────────────────────────────────────────────
-  stealth-rdp:
-    runs-on: ubuntu-latest
-    timeout-minutes: 355
-    needs: disk-reaper
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Restore credentials
-        id: creds
-        run: |
-          echo "username=${{ needs.disk-reaper.outputs.username }}" >> "$GITHUB_OUTPUT"
-          echo "password=${{ needs.disk-reaper.outputs.password }}" >> "$GITHUB_OUTPUT"
-          echo "hostname=${{ needs.disk-reaper.outputs.hostname }}" >> "$GITHUB_OUTPUT"
-
-      # ── Random jitter (spread out cron runs) ──
+      # ── Random jitter ──
       - name: Random jitter
         run: |
           JITTER=$((30 + RANDOM % 270))
           echo "Sleeping ${JITTER}s to spread load..."
           sleep "$JITTER"
 
-      # ── Aggressive disk cleanup (belt + suspenders) ──
-      - name: Reclaim disk space (manual)
+      # ── FREE DISK SPACE (no LVM — safe!) ──
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
+      # ── Extra manual cleanup ──
+      - name: Extra cleanup
         run: |
-          sudo rm -rf /usr/share/dotnet 2>/dev/null || true
-          sudo rm -rf /usr/local/lib/android 2>/dev/null || true
           sudo rm -rf /opt/hostedtoolcache 2>/dev/null || true
+          sudo rm -rf /usr/local/lib/android 2>/dev/null || true
+          sudo rm -rf /usr/share/dotnet 2>/dev/null || true
           sudo rm -rf /opt/ghc 2>/dev/null || true
           sudo rm -rf /usr/local/share/boost 2>/dev/null || true
           sudo rm -rf /usr/share/swift 2>/dev/null || true
           sudo rm -rf /usr/local/julia* 2>/dev/null || true
-          sudo rm -rf /usr/lib/jvm 2>/dev/null || true
           sudo docker system prune -af --volumes 2>/dev/null || true
-          sudo swapoff -a && sudo dd if=/dev/zero of=/swap bs=1M count=2048 && sudo mkswap /swap && sudo swapon /swap
           df -h /
 
       # ── Set hostname ──
-      - name: Set random hostname
+      - name: Set hostname
         run: |
           sudo hostnamectl set-hostname "${{ steps.creds.outputs.hostname }}"
           echo "127.0.1.1 ${{ steps.creds.outputs.hostname }}" | sudo tee -a /etc/hosts
 
-      # ── Install Ubuntu GNOME Desktop + xrdp ──
+      # ── Install GNOME + xrdp ──
       - name: Install GNOME Desktop and xrdp
         run: |
           # Pre-seed tzdata to prevent interactive hang
@@ -111,27 +82,21 @@ jobs:
             policykit-1 \
             --no-install-recommends
 
-          # Remove unnecessary cruft from the install
           sudo apt-get autoremove -y -qq
           sudo apt-get clean -qq
 
       # ── Configure xrdp for GNOME ──
-      - name: Configure xrdp for GNOME
+      - name: Configure xrdp
         run: |
-          # Backup original startwm.sh
           sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak
 
-          # Write proper GNOME xrdp startup script
           sudo tee /etc/xrdp/startwm.sh > /dev/null << 'XRDPEOF'
           #!/bin/sh
-          # xrdp X session startup script for GNOME
-
           if [ -r /etc/default/locale ]; then
             . /etc/default/locale
             export LANG LANGUAGE
           fi
 
-          # Fix: GNOME session over xrdp
           unset DBUS_SESSION_BUS_ADDRESS
           unset XDG_RUNTIME_DIR
 
@@ -144,17 +109,14 @@ jobs:
             export DESKTOP_SESSION=ubuntu
           fi
 
-          # Start GNOME session
           gnome-session --session=ubuntu
           XRDPEOF
 
           sudo chmod 755 /etc/xrdp/startwm.sh
-
-          # Remove .xsession if it exists (can interfere)
           rm -f ~/.xsession ~/.xsessionrc
 
-      # ── Fix Polkit for xrdp ──
-      - name: Fix Polkit for xrdp
+      # ── Polkit fix ──
+      - name: Fix Polkit
         run: |
           sudo tee /etc/polkit-1/localauthority.conf.d/02-allow-colord.conf > /dev/null << 'POLKIT'
           polkit.addRule(function(action, subject) {
@@ -165,8 +127,8 @@ jobs:
           });
           POLKIT
 
-      # ── Fix xrdp config (performance + security) ──
-      - name: Tune xrdp config
+      # ── Tune xrdp ini ──
+      - name: Tune xrdp
         run: |
           sudo sed -i 's/max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini
           sudo sed -i 's/xserverbpp=.*/xserverbpp=24/' /etc/xrdp/xrdp.ini
@@ -178,35 +140,24 @@ jobs:
         run: |
           sudo useradd -m -G sudo -s /bin/bash "${{ steps.creds.outputs.username }}"
           echo "${{ steps.creds.outputs.username }}:${{ steps.creds.outputs.password }}" | sudo chpasswd
-          # Allow sudo without password for this user
-          echo "${{ steps.creds.outputs.username }} ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/${{ steps.creds.outputs.username }}
+          echo "${{ steps.creds.outputs.username }} ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/${{ steps.creds.outputs.username }}"
 
-      # ── Disable GNOME animations / idle lock (performance) ──
-      - name: Optimize GNOME for RDP
+      # ── GNOME performance tweaks ──
+      - name: GNOME tweaks
         run: |
-          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.background picture-uri ''
-          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.screensaver lock-enabled false
-          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.session idle-delay 0
-          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.interface enable-animations false
-          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.background picture-options 'none'
-          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.background primary-color '#000000'
+          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.background picture-uri '' 2>/dev/null || true
+          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null || true
+          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
+          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.interface enable-animations false 2>/dev/null || true
 
-      # ── Kernel tuning ──
-      - name: Kernel tuning
-        run: |
-          echo "vm.swappiness=10" | sudo tee -a /etc/sysctl.conf
-          echo "net.core.default_qdisc=fq" | sudo tee -a /etc/sysctl.conf
-          echo "net.ipv4.tcp_congestion_control=bbr" | sudo tee -a /etc/sysctl.conf
-          sudo sysctl -p
-
-      # ── Restart xrdp services ──
+      # ── Restart xrdp ──
       - name: Restart xrdp
         run: |
           sudo systemctl daemon-reload
-          sudo systemctl restart xrdp
-          sudo systemctl restart xrdp-sesman
+          sudo systemctl restart xrdp || true
+          sudo systemctl restart xrdp-sesman || true
           sleep 3
-          sudo systemctl status xrdp --no-pager
+          sudo systemctl status xrdp --no-pager || true
 
       # ── Install Tailscale ──
       - name: Install Tailscale
@@ -216,7 +167,7 @@ jobs:
           echo "tailscale-ip=$(tailscale ip -4)" >> "$GITHUB_OUTPUT"
         id: tailscale
 
-      # ── Connection health check loop ──
+      # ── Connection health monitor ──
       - name: Connection health monitor
         run: |
           USERNAME="${{ steps.creds.outputs.username }}"
@@ -238,88 +189,41 @@ jobs:
           echo "Connect: Use any RDP client → $TS_IP:3389"
           echo ""
 
-          # Health monitor loop — keeps runner alive, checks services
-          END=$((SECONDS + 350 * 60))  # ~350 minutes
+          END=$((SECONDS + 350 * 60))
           CHECK_INTERVAL=60
 
           while [ $SECONDS -lt $END ]; do
-            # Check xrdp is alive
             if ! pgrep -x xrdp > /dev/null 2>&1; then
-              echo "[WARN] xrdp process died at $(date) — restarting..."
+              echo "[WARN] xrdp died — restarting..."
               sudo systemctl restart xrdp || true
             fi
-
-            # Check xrdp-sesman is alive
             if ! pgrep -x xrdp-sesman > /dev/null 2>&1; then
-              echo "[WARN] xrdp-sesman died at $(date) — restarting..."
+              echo "[WARN] xrdp-sesman died — restarting..."
               sudo systemctl restart xrdp-sesman || true
             fi
-
-            # Check Tailscale is connected
             if ! tailscale status 2>/dev/null | grep -q "$TS_IP"; then
-              echo "[WARN] Tailscale disconnected at $(date) — reconnecting..."
+              echo "[WARN] Tailscale disconnected — reconnecting..."
               sudo tailscale up --auth-key="${{ secrets.TS_AUTH_KEY }}" --hostname="$HOSTNAME" --accept-routes --accept-dns=false || true
             fi
-
-            # Check disk space
-            AVAIL=$(df / --output=avail | tail -1)
-            if [ "$AVAIL" -lt 512000 ]; then
-              echo "[WARN] Low disk space: ${AVAIL}KB available — cleaning..."
-              sudo apt-get clean -qq || true
-              sudo journalctl --vacuum-time=1h 2>/dev/null || true
-            fi
-
             sleep "$CHECK_INTERVAL"
           done
 
-      # ── Final cleanup ──
+      # ── Cleanup ──
       - name: Cleanup
         if: always()
         run: |
-          echo "Running cleanup..."
-          # Logout from Tailscale
           sudo tailscale logout 2>/dev/null || true
-
-          # Remove user
           sudo userdel -r "${{ steps.creds.outputs.username }}" 2>/dev/null || true
           sudo rm -f "/etc/sudoers.d/${{ steps.creds.outputs.username }}" 2>/dev/null || true
-
-          # Wipe xrdp logs
           sudo truncate -s 0 /var/log/xrdp.log 2>/dev/null || true
           sudo truncate -s 0 /var/log/xrdp-sesman.log 2>/dev/null || true
-
-          # Wipe bash history
           history -c 2>/dev/null || true
           rm -f ~/.bash_history 2>/dev/null || true
-
-          # Clear apt cache
           sudo apt-get clean -qq 2>/dev/null || true
 
-          echo "Cleanup complete."
-
-  # ──────────────────────────────────────────────
-  # JOB 3: SUMMARY (optional, just logs)
-  # ──────────────────────────────────────────────
-  summary:
-    runs-on: ubuntu-latest
-    needs: [disk-reaper, stealth-rdp]
-    if: always()
-    steps:
-      - name: Print summary
-        run: |
-          echo "Job finished at $(date)"
-          echo "Username: ${{ needs.disk-reaper.outputs.username }}"
-          echo "Tailscale IP: ${{ needs.disk-reaper.outputs.tailscale-ip }}"
-
-  # ──────────────────────────────────────────────
-  # JOB 4: KEEP-ALIVE (prevents GitHub cron death
-  #         after 60 days of inactivity)
-  # ──────────────────────────────────────────────
-  keep-alive:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
-    steps:
+      # ── Keep-alive ──
       - name: Keep repo alive
+        if: github.event_name == 'schedule'
         run: |
           git config user.name "keepalive-bot"
           git config user.email "keepalive@users.noreply.github.com"
