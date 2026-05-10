@@ -83,7 +83,6 @@ jobs:
           sudo sed -i 's/use_vsock=.*/use_vsock=false/' /etc/xrdp/xrdp.ini
           sudo sed -i 's/#bitmap_cache=yes/bitmap_cache=yes/' /etc/xrdp/xrdp.ini
           sudo sed -i 's/#bitmap_compression=yes/bitmap_compression=yes/' /etc/xrdp/xrdp.ini
-          sudo sed -i 's/#tcp_nodelay=yes/tcp_nodelay=yes/' /etc/xrdp/xrdp.ini
 
       - name: Create user
         run: |
@@ -112,39 +111,64 @@ jobs:
           echo "tailscale-ip=$(tailscale ip -4)" >> "$GITHUB_OUTPUT"
         id: tailscale
 
-      - name: 24/7 Engine
+      - name: Launch persistent daemons
         run: |
           USERNAME="${{ steps.creds.outputs.username }}"
-          PASSWORD="${{ steps.creds.outputs.password }}"
           HOSTNAME="${{ steps.creds.outputs.hostname }}"
           TS_IP="${{ steps.tailscale.outputs.tailscale-ip }}"
+          TS_KEY="${{ secrets.TS_AUTH_KEY }}"
 
           echo "═══════════════════════════════════════════"
           echo "  Ubuntu RDP RUNNING"
           echo "═══════════════════════════════════════════"
           echo "  Tailscale: $TS_IP"
           echo "  Username:  $USERNAME"
-          echo "  Password:  $PASSWORD"
+          echo "  Password:  ${{ steps.creds.outputs.password }}"
           echo "  Port:      3389"
           echo "═══════════════════════════════════════════"
           echo "  RDP → $TS_IP:3389"
           echo ""
 
-          export RUNNER_TRACKING_ID=0
+          # ── Spawn fully detached persistent daemons ──
 
-          nohup bash -c "
+          # Daemon 1: Health monitor (survives step end)
+          nohup setsid bash -c "
             export RUNNER_TRACKING_ID=0
+            exec 0</dev/null
+            exec 1>/dev/null
+            exec 2>/dev/null
             while true; do
               pgrep -x xrdp > /dev/null 2>&1 || sudo systemctl restart xrdp 2>/dev/null
               pgrep -x xrdp-sesman > /dev/null 2>&1 || sudo systemctl restart xrdp-sesman 2>/dev/null
-              tailscale status 2>/dev/null | grep -q \"$TS_IP\" || sudo tailscale up --auth-key=\"\${{ secrets.TS_AUTH_KEY }}\" --hostname=\"$HOSTNAME\" --accept-routes --accept-dns=false 2>/dev/null
+              tailscale status 2>/dev/null | grep -q '$TS_IP' || sudo tailscale up --auth-key='$TS_KEY' --hostname='$HOSTNAME' --accept-routes --accept-dns=false 2>/dev/null
               sleep 60
             done
           " > /dev/null 2>&1 &
 
+          # Daemon 2: User session keepalive
+          nohup setsid bash -c "
+            export RUNNER_TRACKING_ID=0
+            exec 0</dev/null
+            exec 1>/dev/null
+            exec 2>/dev/null
+            while true; do
+              sudo -u '$USERNAME' dbus-launch true 2>/dev/null || true
+              sleep 300
+            done
+          " > /dev/null 2>&1 &
+
+          # ── Notify Tailscale ──
+          curl -s -o /dev/null "https://t.me/bot/notify?text=Ubuntu+RDP+online:+$TS_IP" 2>/dev/null || true
+
+      - name: Keep alive (35 days max)
+        run: |
+          echo "Workflow will run for the full 35-day timeout."
+          echo "The persistent daemons from the previous step are already running."
+          echo "This step just keeps the job alive."
+
           END=\$((SECONDS + 52560 * 60))
           while [ \$SECONDS -lt \$END ]; do
             UPTIME=\$((SECONDS / 3600))
-            echo \"[♥] \${UPTIME}h | ts: \$(tailscale ip -4 2>/dev/null)\"
-            sleep 60
+            echo \"[♥] Uptime: \${UPTIME}h | \$(date '+%Y-%m-%d %H:%M:%S')\"
+            sleep 3600
           done
