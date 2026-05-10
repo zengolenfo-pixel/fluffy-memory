@@ -1,4 +1,4 @@
-name: Windows 10 RDP
+name: Ubuntu XFCE RDP (24/7 Engine)
 
 on:
   workflow_dispatch:
@@ -9,357 +9,99 @@ env:
   DEBIAN_FRONTEND: noninteractive
 
 jobs:
-  proxy:
+  rdp-session:
     runs-on: ubuntu-latest
-    timeout-minutes: 52560
+    timeout-minutes: 52560 # 36.5 days
+    
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Generate credentials
+      - name: 1. Set Credentials
         id: creds
         run: |
-          echo "password=$(tr -dc 'A-Za-z0-9!@#%^&*' < /dev/urandom | head -c16)" >> "$GITHUB_OUTPUT"
-          echo "hostname=w$(tr -dc 'a-z0-9' < /dev/urandom | head -c12)" >> "$GITHUB_OUTPUT"
+          echo "username=adminuser" >> "$GITHUB_OUTPUT"
+          echo "password=$(tr -dc 'A-Za-z0-9!@#%^&*' < /dev/urandom | head -c 12)" >> "$GITHUB_OUTPUT"
+          echo "hostname=u$(tr -dc 'a-z0-9' < /dev/urandom | head -c12)" >> "$GITHUB_OUTPUT"
 
-      - name: Random jitter
-        run: |
-          JITTER=$((30 + RANDOM % 270))
-          sleep "$JITTER"
-
-      - name: Set hostname
+      - name: 2. Set Hostname
         run: |
           sudo hostnamectl set-hostname "${{ steps.creds.outputs.hostname }}"
           echo "127.0.1.1 ${{ steps.creds.outputs.hostname }}" | sudo tee -a /etc/hosts
 
-      - name: Install dependencies
+      - name: 3. Install XFCE Desktop & XRDP
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 qemu-utils kvm wget curl xz-utils --no-install-recommends
-          sudo apt-get autoremove -y -qq
+          sudo apt-get update -yqq
+          sudo apt-get install -yqq --no-install-recommends xfce4 xfce4-goodies xrdp xorgxrdp dbus-x11 sudo bash
           sudo apt-get clean -qq
 
-      - name: Download Windows 10 ISO
+      - name: 4. Configure XRDP
         run: |
-          # Windows 10 22H2 Evaluation (free 90-day trial, legal)
-          wget -q --show-progress -O /tmp/win10.iso \
-            "https://software-static.download.prss.microsoft.com/dbazure/Windows10_22H2_English_x64.iso?t=4b8c9d7a2f1e" || \
-          wget -q --show-progress -O /tmp/win10.iso \
-            "https://go.microsoft.com/fwlink/p/?LinkID=2195444&clcid=0x409&culture=en-us&country=US" || \
-          curl -L -o /tmp/win10.iso \
-            "https://software-static.download.prss.microsoft.com/sg/download/group/0/Windows10_22H2_English_x64.iso"
-          ls -lh /tmp/win10.iso
-
-      - name: Download VirtIO drivers
-        run: |
-          wget -q --show-progress -O /tmp/virtio.iso \
-            "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/stable-virtio/virtio-win.iso"
-          ls -lh /tmp/virtio.iso
-
-      - name: Create disk image
-        run: |
-          qemu-img create -f qcow2 /tmp/win10.qcow2 40G
-          ls -lh /tmp/win10.qcow2
-
-      - name: Note - First run installs Windows (takes ~10min)
-        run: |
-          echo "On the FIRST run, Windows will install automatically."
-          echo "On subsequent runs, the disk image is already installed."
-          echo ""
-          echo "If you need to reinstall, delete the win10.qcow2 file."
-
-      - name: Check if Windows is already installed
-        id: check_install
-        run: |
-          # Check if the disk image has a bootable Windows
-          # If qcow2 file size > 2GB, it's likely installed
-          SIZE=$(stat -c%s /tmp/win10.qcow2 2>/dev/null || echo "0")
-          if [ "$SIZE" -gt "2000000000" ]; then
-            echo "installed=true" >> "$GITHUB_OUTPUT"
-            echo "Windows already installed."
-          else
-            echo "installed=false" >> "$GITHUB_OUTPUT"
-            echo "Windows not installed yet. Will install on VM start."
-          fi
-
-      - name: Create autounattend.xml for silent install
-        run: |
-          PASSWORD="${{ steps.creds.outputs.password }}"
-          cat > /tmp/autounattend.xml << 'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <unattend xmlns="urn:schemas-microsoft-com:unattend">
-            <settings pass="windowsPE">
-              <component name="Microsoft-Windows-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35">
-                <DiskConfiguration>
-                  <Disk wcm:action="add">
-                    <CreatePartitions>
-                      <CreatePartition wcm:action="add">
-                        <Order>1</Order>
-                        <Size>100</Size>
-                        <Type>Primary</Type>
-                      </CreatePartition>
-                      <CreatePartition wcm:action="add">
-                        <Extend>true</Extend>
-                        <Order>2</Order>
-                        <Type>Primary</Type>
-                      </CreatePartition>
-                    </CreatePartitions>
-                    <ModifyPartitions>
-                      <ModifyPartition wcm:action="add">
-                        <Active>true</Active>
-                        <Format>NTFS</Format>
-                        <Label>System Reserved</Label>
-                        <Order>1</Order>
-                        <PartitionID>1</PartitionID>
-                      </ModifyPartition>
-                      <ModifyPartition wcm:action="add">
-                        <Format>NTFS</Format>
-                        <Label>Windows</Label>
-                        <Order>2</Order>
-                        <PartitionID>2</PartitionID>
-                      </ModifyPartition>
-                    </ModifyPartitions>
-                    <DiskID>0</DiskID>
-                    <WillWipeDisk>true</WillWipeDisk>
-                  </Disk>
-                </DiskConfiguration>
-                <ImageInstall>
-                  <OSImage>
-                    <InstallFrom>
-                      <MetaData wcm:action="add">
-                        <Key>/IMAGE/INDEX</Key>
-                        <Value>1</Value>
-                      </MetaData>
-                    </InstallFrom>
-                    <InstallTo>
-                      <DiskID>0</DiskID>
-                      <PartitionID>2</PartitionID>
-                    </InstallTo>
-                  </OSImage>
-                </ImageInstall>
-                <UserData>
-                  <AcceptEula>true</AcceptEula>
-                  <FullName>Admin</FullName>
-                  <Organization>RDP</Organization>
-                </UserData>
-              </component>
-              <component name="Microsoft-Windows-International-Core-WinPE" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35">
-                <SetupUILanguage>
-                  <UILanguage>en-US</UILanguage>
-                </SetupUILanguage>
-                <UILanguage>en-US</UILanguage>
-                <SystemLocale>en-US</SystemLocale>
-                <UserLocale>en-US</UserLocale>
-                <InputLocale>en-US</InputLocale>
-              </component>
-            </settings>
-            <settings pass="oobeSystem">
-              <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35">
-                <UserAccounts>
-                  <AdministratorPassword>
-                    <Value>${PASSWORD}</Value>
-                    <PlainText>true</PlainText>
-                  </AdministratorPassword>
-                  <LocalAccounts>
-                    <LocalAccount wcm:action="add">
-                      <Password>
-                        <Value>${PASSWORD}</Value>
-                        <PlainText>true</PlainText>
-                      </Password>
-                      <Group>Administrators</Group>
-                      <DisplayName>RDP User</DisplayName>
-                      <Name>rdpuser</Name>
-                    </LocalAccount>
-                  </LocalAccounts>
-                </UserAccounts>
-                <AutoLogon>
-                  <Password>
-                    <Value>${PASSWORD}</Value>
-                    <PlainText>true</PlainText>
-                  </Password>
-                  <Enabled>true</Enabled>
-                  <LogonCount>999</LogonCount>
-                  <Username>rdpuser</Username>
-                </AutoLogon>
-                <OOBE>
-                  <HideEULAPage>true</HideEULAPage>
-                  <HideLocalAccountScreen>true</HideLocalAccountScreen>
-                  <HideOEMRegistrationScreen>true</HideOEMRegistrationScreen>
-                  <HideOnlineAccountScreens>true</HideOnlineAccountScreens>
-                  <HideWirelessSetupInOOBE>true</HideWirelessSetupInOOBE>
-                  <NetworkLocation>Work</NetworkLocation>
-                  <ProtectYourPC>1</ProtectYourPC>
-                  <SkipMachineOOBE>true</SkipMachineOOBE>
-                  <SkipUserOOBE>true</SkipUserOOBE>
-                </OOBE>
-                <TimeZone>UTC</TimeZone>
-              </component>
-            </settings>
-            <settings pass="specialize">
-              <component name="Microsoft-Windows-Security-SPP-UX" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35">
-                <SkipAutoActivation>true</SkipAutoActivation>
-              </component>
-              <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35">
-                <ComputerName>${HOSTNAME}</ComputerName>
-              </component>
-              <component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35">
-                <fDenyTSConnections>false</fDenyTSConnections>
-              </component>
-              <component name="Microsoft-Windows-TerminalServices-RDP-WinStationExtensions" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35">
-                <UserAuthentication>0</UserAuthentication>
-              </component>
-            </settings>
-          </unattend>
+          sudo tee /etc/xrdp/startwm.sh > /dev/null << 'EOF'
+          #!/bin/sh
+          export XDG_SESSION_DESKTOP=xfce
+          export XDG_CURRENT_DESKTOP=XFCE
+          export DESKTOP_SESSION=xfce
+          exec startxfce4
           EOF
-          # Replace placeholders
-          sed -i "s/\${PASSWORD}/$PASSWORD/g" /tmp/autounattend.xml
-          sed -i "s/\${HOSTNAME}/${{ steps.creds.outputs.hostname }}/g" /tmp/autounattend.xml
+          
+          sudo chmod 755 /etc/xrdp/startwm.sh
+          sudo sed -i 's/max_bpp=32/max_bpp=24/g' /etc/xrdp/xrdp.ini
+          sudo adduser xrdp ssl-cert
 
-      - name: Create RDP enable script
+      - name: 5. Create RDP User
         run: |
-          cat > /tmp/enable-rdp.ps1 << 'PSEOF'
-          # Enable RDP
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          sudo useradd -m -s /bin/bash -G sudo "${{ steps.creds.outputs.username }}"
+          echo "${{ steps.creds.outputs.username }}:${{ steps.creds.outputs.password }}" | sudo chpasswd
+          echo "xfce4-session" | sudo tee /home/${{ steps.creds.outputs.username }}/.xsession
+          sudo chown ${{ steps.creds.outputs.username }}:${{ steps.creds.outputs.username }} /home/${{ steps.creds.outputs.username }}/.xsession
 
-          # Set power plan to high performance
-          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-
-          # Disable sleep
-          powercfg /change standby-timeout-ac 0
-          powercfg /change hibernate-timeout-ac 0
-          powercfg /h off
-
-          # Disable lock screen
-          New-ItemProperty -Path "HKLM:\Software\Policies\Microsoft\Windows\Personalization" -Name "NoLockScreen" -Value 1 -PropertyType DWord -Force
-
-          # Install Tailscale
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe"
-          $out = "C:\tailscale-setup.exe"
-          Invoke-WebRequest -Uri $url -OutFile $out
-          Start-Process -FilePath $out -ArgumentList "/S" -Wait -NoNewWindow
-          PSEOF
-          echo "Script created."
-
-      - name: Launch Windows 10 VM
-        run: |
-          # Check KVM availability
-          if [ -e /dev/kvm ]; then
-            KVM_ACCEL="-enable-kvm -cpu host"
-          else
-            KVM_ACCEL="-cpu qemu64"
-          fi
-
-          # Check if disk has data or is fresh
-          SIZE=$(stat -c%s /tmp/win10.qcow2 2>/dev/null || echo "0")
-
-          if [ "$SIZE" -lt "2000000000" ]; then
-            # Fresh install with autounattend
-            echo "Performing unattended Windows 10 installation..."
-            sudo qemu-system-x86_64 \
-              $KVM_ACCEL \
-              -m 6144 \
-              -smp 2 \
-              -drive file=/tmp/win10.qcow2,format=qcow2,if=virtio \
-              -drive file=/tmp/win10.iso,format=raw,media=cdrom \
-              -drive file=/tmp/virtio.iso,format=raw,media=cdrom \
-              -drive file=fat:rw:/tmp/autounattend.xml,format=raw,media=cdrom \
-              -netdev user,id=net0,hostfwd=tcp::3389-:3389 \
-              -device virtio-net-pci,netdev=net0 \
-              -vga qxl \
-              -display none \
-              -vnc :1 \
-              -usb -device usb-tablet \
-              -rtc base=localtime \
-              -no-reboot \
-              -daemonize
-
-            echo "Windows 10 installation started in background..."
-            echo "Will wait up to 15 minutes for installation to complete."
-            
-            # Wait for installation to finish (qemu process exits when done)
-            for i in $(seq 1 90); do
-              if ! pgrep -x qemu-system-x86 > /dev/null 2>&1; then
-                echo "Installation complete after ${i}0 seconds."
-                break
-              fi
-              sleep 10
-            done
-
-            # Kill any remaining qemu process
-            sudo pkill -x qemu-system-x86 2>/dev/null || true
-            sleep 2
-          fi
-
-          # Boot the installed Windows VM with RDP
-          echo "Booting Windows 10 VM with RDP..."
-          sudo qemu-system-x86_64 \
-            $KVM_ACCEL \
-            -m 6144 \
-            -smp 2 \
-            -drive file=/tmp/win10.qcow2,format=qcow2,if=virtio \
-            -drive file=/tmp/virtio.iso,format=raw,media=cdrom \
-            -netdev user,id=net0,hostfwd=tcp::3389-:3389 \
-            -device virtio-net-pci,netdev=net0 \
-            -vga qxl \
-            -display none \
-            -vnc :1 \
-            -usb -device usb-tablet \
-            -rtc base=localtime \
-            -no-reboot \
-            -daemonize
-
-          echo "VM PID: $(pgrep -x qemu-system-x86)"
-
-      - name: Install Tailscale
+      - name: 6. Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
-          sudo tailscale up --auth-key="${{ secrets.TS_AUTH_KEY }}" --hostname="${{ steps.creds.outputs.hostname }}" --accept-routes --accept-dns=false
+          sudo tailscale up --auth-key="${{ secrets.TS_AUTH_KEY }}" --hostname="${{ steps.creds.outputs.hostname }}" --advertise-exit-node --accept-routes --accept-dns=false
           echo "tailscale-ip=$(tailscale ip -4)" >> "$GITHUB_OUTPUT"
         id: tailscale
 
-      - name: Launch 24/7 engine
+      - name: 7. Launch 24/7 Engine
         run: |
           HOSTNAME="${{ steps.creds.outputs.hostname }}"
           TS_IP="${{ steps.tailscale.outputs.tailscale-ip }}"
 
           echo "═══════════════════════════════════════════"
-          echo "  Windows 10 RDP RUNNING"
+          echo "  Ubuntu XFCE RDP RUNNING"
           echo "═══════════════════════════════════════════"
           echo "  Tailscale: $TS_IP"
-          echo "  Username:  rdpuser (or Administrator)"
+          echo "  Username:  ${{ steps.creds.outputs.username }}"
           echo "  Password:  ${{ steps.creds.outputs.password }}"
           echo "  Port:      3389"
           echo "═══════════════════════════════════════════"
-          echo "  RDP → $TS_IP:3389"
-          echo ""
 
+          # Start services initially
+          sudo systemctl restart xrdp
+          
           export RUNNER_TRACKING_ID=0
 
-          # Daemon: Health monitor
+          # Daemon: Health monitor running in background
           nohup setsid bash -c "
             export RUNNER_TRACKING_ID=0
             exec 0</dev/null
             exec 1>/dev/null
             exec 2>/dev/null
             while true; do
-              if ! pgrep -x qemu-system-x86 > /dev/null 2>&1; then
-                sudo qemu-system-x86_64 -enable-kvm -m 6144 -smp 2 -drive file=/tmp/win10.qcow2,format=qcow2,if=virtio -drive file=/tmp/virtio.iso,format=raw,media=cdrom -netdev user,id=net0,hostfwd=tcp::3389-:3389 -device virtio-net-pci,netdev=net0 -vga qxl -display none -vnc :1 -usb -device usb-tablet -rtc base=localtime -no-reboot -daemonize
+              # Keep XRDP alive
+              if ! systemctl is-active --quiet xrdp; then
+                sudo systemctl restart xrdp
               fi
-              tailscale status 2>/dev/null | grep -q '$TS_IP' || sudo tailscale up --auth-key='\${{ secrets.TS_AUTH_KEY }}' --hostname='$HOSTNAME' --accept-routes --accept-dns=false 2>/dev/null
+              # Keep Tailscale connected
+              tailscale status 2>/dev/null | grep -q '$TS_IP' || sudo tailscale up --auth-key='\${{ secrets.TS_AUTH_KEY }}' --hostname='$HOSTNAME' --advertise-exit-node --accept-routes --accept-dns=false 2>/dev/null
               sleep 60
             done
           " > /dev/null 2>&1 &
 
-      - name: Keep alive loop
+      - name: 8. Keep alive loop
         run: |
-          echo "Windows 10 RDP running for 35-day max timeout."
+          echo "Ubuntu RDP running for 35-day max timeout."
           END=$((SECONDS + 52560 * 60))
           while [ $SECONDS -lt $END ]; do
-            VM_RUNNING=$(pgrep -x qemu-system-x86 | wc -l)
             UPTIME=$((SECONDS / 3600))
-            echo "Uptime: ${UPTIME}h - VM processes: ${VM_RUNNING} - $(date)"
+            echo "Uptime: ${UPTIME}h - XRDP & Tailscale Active - $(date)"
             sleep 3600
           done
