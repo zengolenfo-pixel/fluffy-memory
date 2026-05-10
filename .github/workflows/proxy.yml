@@ -1,4 +1,4 @@
-name: Ubuntu RDP Proxy
+name: macOS RDP
 
 on:
   workflow_dispatch:
@@ -11,12 +11,11 @@ env:
 jobs:
   proxy:
     runs-on: ubuntu-latest
-    timeout-minutes: 355
+    timeout-minutes: 52560
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Generate random credentials ──
       - name: Generate credentials
         id: creds
         run: |
@@ -24,142 +23,110 @@ jobs:
           echo "password=$(tr -dc 'A-Za-z0-9!@#%^&*' < /dev/urandom | head -c16)" >> "$GITHUB_OUTPUT"
           echo "hostname=n$(tr -dc 'a-z0-9' < /dev/urandom | head -c12)" >> "$GITHUB_OUTPUT"
 
-      # ── Random jitter ──
       - name: Random jitter
         run: |
           JITTER=$((30 + RANDOM % 270))
-          echo "Sleeping ${JITTER}s to spread load..."
+          echo "Sleeping ${JITTER}s..."
           sleep "$JITTER"
 
-      # ── FREE DISK SPACE (no LVM — safe!) ──
-      - name: Free disk space
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: false
-
-      # ── Extra manual cleanup ──
-      - name: Extra cleanup
-        run: |
-          sudo rm -rf /opt/hostedtoolcache 2>/dev/null || true
-          sudo rm -rf /usr/local/lib/android 2>/dev/null || true
-          sudo rm -rf /usr/share/dotnet 2>/dev/null || true
-          sudo rm -rf /opt/ghc 2>/dev/null || true
-          sudo rm -rf /usr/local/share/boost 2>/dev/null || true
-          sudo rm -rf /usr/share/swift 2>/dev/null || true
-          sudo rm -rf /usr/local/julia* 2>/dev/null || true
-          sudo docker system prune -af --volumes 2>/dev/null || true
-          df -h /
-
-      # ── Set hostname ──
       - name: Set hostname
         run: |
           sudo hostnamectl set-hostname "${{ steps.creds.outputs.hostname }}"
           echo "127.0.1.1 ${{ steps.creds.outputs.hostname }}" | sudo tee -a /etc/hosts
 
-      # ── Install GNOME + xrdp ──
-      - name: Install GNOME Desktop and xrdp
+      - name: Install xrdp + GNOME
         run: |
-          # Pre-seed tzdata to prevent interactive hang
           echo "tzdata tzdata/Areas select Etc" | sudo debconf-set-selections
           echo "tzdata tzdata/Zones/Etc select UTC" | sudo debconf-set-selections
-
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             ubuntu-desktop-minimal \
-            xrdp \
-            xorgxrdp \
-            dbus-x11 \
-            gnome-terminal \
-            nautilus \
-            firefox \
-            gedit \
+            xrdp xorgxrdp dbus-x11 \
+            gnome-terminal nautilus firefox \
+            gnome-tweaks gnome-shell-extensions \
             policykit-1 \
             --no-install-recommends
-
           sudo apt-get autoremove -y -qq
           sudo apt-get clean -qq
 
-      # ── Configure xrdp for GNOME ──
-      - name: Configure xrdp
+      - name: Fix black screen + configure xrdp
         run: |
           sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak
-
           sudo tee /etc/xrdp/startwm.sh > /dev/null << 'XRDPEOF'
           #!/bin/sh
           if [ -r /etc/default/locale ]; then
             . /etc/default/locale
             export LANG LANGUAGE
           fi
-
-          unset DBUS_SESSION_BUS_ADDRESS
-          unset XDG_RUNTIME_DIR
-
-          export GNOME_SHELL_SESSION_MODE=ubuntu
-          export XDG_CURRENT_DESKTOP=ubuntu:GNOME
-          export XDG_SESSION_TYPE=x11
-          export DESKTOP_SESSION=ubuntu
-
-          if [ -n "$XRDP_SESSION" ]; then
-            export DESKTOP_SESSION=ubuntu
+          if [ -z "$DBUS_SESSION_BUS_ADDRESS" ]; then
+            export $(dbus-launch)
           fi
-
+          export XDG_SESSION_TYPE=x11
+          export XDG_CURRENT_DESKTOP=ubuntu:GNOME
+          export GNOME_SHELL_SESSION_MODE=ubuntu
+          export DESKTOP_SESSION=ubuntu
           gnome-session --session=ubuntu
           XRDPEOF
-
           sudo chmod 755 /etc/xrdp/startwm.sh
-          rm -f ~/.xsession ~/.xsessionrc
+          echo "export GNOME_SHELL_SESSION_MODE=ubuntu" > ~/.xsessionrc
+          echo "export XDG_CURRENT_DESKTOP=ubuntu:GNOME" >> ~/.xsessionrc
+          echo "export XDG_SESSION_TYPE=x11" >> ~/.xsessionrc
+          sudo sed -i 's/#WaylandEnable=false/WaylandEnable=false/' /etc/gdm3/custom.conf 2>/dev/null || true
+          echo "WaylandEnable=false" | sudo tee -a /etc/gdm3/custom.conf 2>/dev/null || true
 
-      # ── Polkit fix ──
-      - name: Fix Polkit
+      - name: Polkit fix
         run: |
-          sudo tee /etc/polkit-1/localauthority.conf.d/02-allow-colord.conf > /dev/null << 'POLKIT'
-          polkit.addRule(function(action, subject) {
-            if (action.id.indexOf("org.freedesktop.color-manager") === 0 ||
-                action.id.indexOf("org.freedesktop.systemd1") === 0) {
-              return polkit.Result.YES;
-            }
-          });
+          sudo tee /etc/polkit-1/localauthority.conf.d/02-allow-all.conf > /dev/null << 'POLKIT'
+          polkit.addRule(function(action, subject) { return polkit.Result.YES; });
           POLKIT
 
-      # ── Tune xrdp ini ──
       - name: Tune xrdp
         run: |
           sudo sed -i 's/max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini
           sudo sed -i 's/xserverbpp=.*/xserverbpp=24/' /etc/xrdp/xrdp.ini
           sudo sed -i 's/encrypt_level=.*/encrypt_level=high/' /etc/xrdp/xrdp.ini
           sudo sed -i 's/use_vsock=.*/use_vsock=false/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/#bitmap_cache=yes/bitmap_cache=yes/' /etc/xrdp/xrdp.ini
+          sudo sed -i 's/#bitmap_compression=yes/bitmap_compression=yes/' /etc/xrdp/xrdp.ini
 
-      # ── Create user ──
-      - name: Create RDP user
+      - name: Create user
         run: |
           sudo useradd -m -G sudo -s /bin/bash "${{ steps.creds.outputs.username }}"
           echo "${{ steps.creds.outputs.username }}:${{ steps.creds.outputs.password }}" | sudo chpasswd
           echo "${{ steps.creds.outputs.username }} ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/${{ steps.creds.outputs.username }}"
 
-      # ── GNOME performance tweaks ──
-      - name: GNOME tweaks
+      - name: macOS experience
         run: |
-          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.background picture-uri '' 2>/dev/null || true
-          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.screensaver lock-enabled false 2>/dev/null || true
-          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.session idle-delay 0 2>/dev/null || true
-          sudo -u "${{ steps.creds.outputs.username }}" dbus-launch gsettings set org.gnome.desktop.interface enable-animations false 2>/dev/null || true
+          U="${{ steps.creds.outputs.username }}"
+          sudo -u "$U" dbus-launch gsettings set org.gnome.desktop.wm.preferences button-layout 'close,minimize,maximize:'
+          sudo -u "$U" dbus-launch gsettings set org.gnome.shell.extensions.dash-to-dock dock-position 'BOTTOM'
+          sudo -u "$U" dbus-launch gsettings set org.gnome.shell.extensions.dash-to-dock autohide false
+          sudo -u "$U" dbus-launch gsettings set org.gnome.shell.extensions.dash-to-dock intellihide false
+          sudo -u "$U" dbus-launch gsettings set org.gnome.shell.extensions.dash-to-dock show-trash false
+          sudo -u "$U" dbus-launch gsettings set org.gnome.shell.extensions.dash-to-dock dash-max-icon-size 48
+          sudo -u "$U" dbus-launch gsettings set org.gnome.shell.extensions.dash-to-dock extend-height false
+          sudo -u "$U" dbus-launch gsettings set org.gnome.desktop.interface color-scheme 'prefer-dark'
+          sudo -u "$U" dbus-launch gsettings set org.gnome.shell.ubuntu color-scheme 'dark'
+          sudo -u "$U" dbus-launch gsettings set org.gnome.desktop.screensaver lock-enabled false
+          sudo -u "$U" dbus-launch gsettings set org.gnome.desktop.screensaver idle-activation-enabled false
+          sudo -u "$U" dbus-launch gsettings set org.gnome.desktop.session idle-delay 0
+          sudo -u "$U" dbus-launch gsettings set org.gnome.desktop.interface enable-animations false
+          sudo -u "$U" dbus-launch gsettings set org.gnome.desktop.background picture-uri ''
+          sudo -u "$U" dbus-launch gsettings set org.gnome.desktop.background primary-color '#000000'
+          sudo -u "$U" dbus-launch gsettings set org.gnome.desktop.interface clock-show-date true
+          sudo -u "$U" dbus-launch gsettings set org.gnome.desktop.interface clock-show-weekday true
+          echo "export GNOME_SHELL_SESSION_MODE=ubuntu" > "/home/$U/.xsessionrc"
+          echo "export XDG_CURRENT_DESKTOP=ubuntu:GNOME" >> "/home/$U/.xsessionrc"
+          echo "export XDG_SESSION_TYPE=x11" >> "/home/$U/.xsessionrc"
+          chown "$U:$U" "/home/$U/.xsessionrc"
 
-      # ── Restart xrdp ──
       - name: Restart xrdp
         run: |
           sudo systemctl daemon-reload
           sudo systemctl restart xrdp || true
           sudo systemctl restart xrdp-sesman || true
           sleep 3
-          sudo systemctl status xrdp --no-pager || true
 
-      # ── Install Tailscale ──
       - name: Install Tailscale
         run: |
           curl -fsSL https://tailscale.com/install.sh | sh
@@ -167,8 +134,7 @@ jobs:
           echo "tailscale-ip=$(tailscale ip -4)" >> "$GITHUB_OUTPUT"
         id: tailscale
 
-      # ── Connection health monitor ──
-      - name: Connection health monitor
+      - name: 24/7 Engine
         run: |
           USERNAME="${{ steps.creds.outputs.username }}"
           PASSWORD="${{ steps.creds.outputs.password }}"
@@ -176,58 +142,39 @@ jobs:
           TS_IP="${{ steps.tailscale.outputs.tailscale-ip }}"
 
           echo "═══════════════════════════════════════════"
-          echo "  Ubuntu GNOME RDP is RUNNING"
+          echo "  🍎 macOS RDP RUNNING"
           echo "═══════════════════════════════════════════"
-          echo "  Hostname:  $HOSTNAME"
           echo "  Tailscale: $TS_IP"
           echo "  Username:  $USERNAME"
           echo "  Password:  $PASSWORD"
           echo "  Port:      3389"
-          echo "  Desktop:   GNOME (Ubuntu)"
           echo "═══════════════════════════════════════════"
-          echo ""
-          echo "Connect: Use any RDP client → $TS_IP:3389"
+          echo "  RDP → $TS_IP:3389"
           echo ""
 
-          END=$((SECONDS + 350 * 60))
-          CHECK_INTERVAL=60
+          export RUNNER_TRACKING_ID=0
 
-          while [ $SECONDS -lt $END ]; do
-            if ! pgrep -x xrdp > /dev/null 2>&1; then
-              echo "[WARN] xrdp died — restarting..."
-              sudo systemctl restart xrdp || true
-            fi
-            if ! pgrep -x xrdp-sesman > /dev/null 2>&1; then
-              echo "[WARN] xrdp-sesman died — restarting..."
-              sudo systemctl restart xrdp-sesman || true
-            fi
-            if ! tailscale status 2>/dev/null | grep -q "$TS_IP"; then
-              echo "[WARN] Tailscale disconnected — reconnecting..."
-              sudo tailscale up --auth-key="${{ secrets.TS_AUTH_KEY }}" --hostname="$HOSTNAME" --accept-routes --accept-dns=false || true
-            fi
-            sleep "$CHECK_INTERVAL"
+          nohup bash -c "
+            export RUNNER_TRACKING_ID=0
+            while true; do
+              pgrep -x xrdp > /dev/null 2>&1 || sudo systemctl restart xrdp 2>/dev/null
+              pgrep -x xrdp-sesman > /dev/null 2>&1 || sudo systemctl restart xrdp-sesman 2>/dev/null
+              tailscale status 2>/dev/null | grep -q \"$TS_IP\" || sudo tailscale up --auth-key=\"\${{ secrets.TS_AUTH_KEY }}\" --hostname=\"$HOSTNAME\" --accept-routes --accept-dns=false 2>/dev/null
+              sleep 60
+            done
+          " > /dev/null 2>&1 &
+
+          setsid bash -c "
+            export RUNNER_TRACKING_ID=0
+            while true; do
+              sudo -u \"$USERNAME\" dbus-launch true 2>/dev/null || true
+              sleep 120
+            done
+          " < /dev/null > /dev/null 2>&1 &
+
+          END=\$((SECONDS + 52560 * 60))
+          while [ \$SECONDS -lt \$END ]; do
+            UPTIME=\$((SECONDS / 3600))
+            echo \"[♥] \${UPTIME}h | ts: \$(tailscale ip -4 2>/dev/null)\"
+            sleep 60
           done
-
-      # ── Cleanup ──
-      - name: Cleanup
-        if: always()
-        run: |
-          sudo tailscale logout 2>/dev/null || true
-          sudo userdel -r "${{ steps.creds.outputs.username }}" 2>/dev/null || true
-          sudo rm -f "/etc/sudoers.d/${{ steps.creds.outputs.username }}" 2>/dev/null || true
-          sudo truncate -s 0 /var/log/xrdp.log 2>/dev/null || true
-          sudo truncate -s 0 /var/log/xrdp-sesman.log 2>/dev/null || true
-          history -c 2>/dev/null || true
-          rm -f ~/.bash_history 2>/dev/null || true
-          sudo apt-get clean -qq 2>/dev/null || true
-
-      # ── Keep-alive ──
-      - name: Keep repo alive
-        if: github.event_name == 'schedule'
-        run: |
-          git config user.name "keepalive-bot"
-          git config user.email "keepalive@users.noreply.github.com"
-          date +%s > .keepalive
-          git add .keepalive
-          git commit -m "Keep repo alive [skip ci]" || true
-          git push || true
