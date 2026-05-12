@@ -4,112 +4,50 @@ on:
   workflow_dispatch:
 
 env:
-  ADB_INSTALL_TIMEOUT: 30
+  AVD_NAME: ultraandroid
+  API_LEVEL: "35"
+  TARGET: google_apis_playstore
+  ARCH: x86_64
   ANDROID_SERIAL: emulator-5554
+  ADB_INSTALL_TIMEOUT: "60"
 
 jobs:
   ultra-android:
-    name: Ultra Android Cloud
+    name: Ultra Android Cloud PlayStore
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-
-      ####################################################################
-      # CHECKOUT
-      ####################################################################
-
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      ####################################################################
-      # BASIC PACKAGES
-      ####################################################################
-
-      - name: Install dependencies
+      - name: Install Linux dependencies
         run: |
           sudo apt update
-
           sudo apt install -y \
-            adb \
-            curl \
-            wget \
-            unzip \
-            zip \
-            jq \
-            git \
-            net-tools \
-            iproute2 \
-            software-properties-common \
-            qemu-kvm \
-            qemu-utils \
-            bridge-utils \
-            cpu-checker \
-            docker.io \
-            ca-certificates \
-            lsb-release \
-            gnupg \
-            screen \
-            tmux \
-            htop \
-            nano \
-            xvfb
-
-      ####################################################################
-      # SYSTEM INFO
-      ####################################################################
-
-      - name: System info
-        run: |
-          echo "========================"
-          echo "CPU INFO"
-          echo "========================"
-          lscpu || true
-
-          echo "========================"
-          echo "RAM INFO"
-          echo "========================"
-          free -h || true
-
-          echo "========================"
-          echo "DISK INFO"
-          echo "========================"
-          df -h || true
-
-      ####################################################################
-      # NETWORK TWEAKS
-      ####################################################################
-
-      - name: Network tuning
-        run: |
-          sudo sysctl -w net.core.rmem_max=2500000
-          sudo sysctl -w net.core.wmem_max=2500000
-          sudo sysctl -w net.core.netdev_max_backlog=5000
-
-          sudo sysctl -w net.ipv4.tcp_rmem="4096 87380 2500000"
-          sudo sysctl -w net.ipv4.tcp_wmem="4096 65536 2500000"
-
-          sudo sysctl -w net.ipv4.tcp_fastopen=3 || true
-          sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0 || true
-          sudo sysctl -w net.ipv4.tcp_window_scaling=1 || true
-          sudo sysctl -w net.ipv4.tcp_mtu_probing=1 || true
-
-          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr || true
-
-          echo "network optimized"
-
-      ####################################################################
-      # KVM
-      ####################################################################
+            curl wget unzip zip jq git \
+            net-tools iproute2 dnsutils \
+            qemu-kvm qemu-utils cpu-checker \
+            xvfb screen tmux htop nano \
+            ca-certificates gnupg lsb-release
 
       - name: Enable KVM
         run: |
-          sudo chmod 666 /dev/kvm || true
-          ls -la /dev/kvm || true
+          sudo chmod 666 /dev/kvm
+          ls -la /dev/kvm
+          kvm-ok || true
 
-      ####################################################################
-      # JAVA
-      ####################################################################
+      - name: System network optimization
+        run: |
+          sudo sysctl -w net.core.rmem_max=2500000 || true
+          sudo sysctl -w net.core.wmem_max=2500000 || true
+          sudo sysctl -w net.core.netdev_max_backlog=5000 || true
+          sudo sysctl -w net.ipv4.tcp_rmem="4096 87380 2500000" || true
+          sudo sysctl -w net.ipv4.tcp_wmem="4096 65536 2500000" || true
+          sudo sysctl -w net.ipv4.tcp_fastopen=3 || true
+          sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0 || true
+          sudo sysctl -w net.ipv4.tcp_mtu_probing=1 || true
+          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr || true
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -117,70 +55,54 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      ####################################################################
-      # ANDROID SDK
-      ####################################################################
-
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
-      ####################################################################
-      # ACCEPT LICENSES
-      ####################################################################
 
       - name: Accept Android licenses
         run: |
           yes | sdkmanager --licenses || true
 
-      ####################################################################
-      # INSTALL SDK PACKAGES
-      ####################################################################
-
-      - name: Install Android packages
+      - name: Install Android emulator packages
         run: |
-          sdkmanager \
+          sdkmanager --install \
             "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0" \
             "emulator" \
-            "system-images;android-35;google_apis_playstore;x86_64"
+            "platforms;android-${API_LEVEL}" \
+            "build-tools;35.0.0" \
+            "system-images;android-${API_LEVEL};${TARGET};${ARCH}"
 
-      ####################################################################
-      # CREATE AVD
-      ####################################################################
-
-      - name: Create emulator
+      - name: Create Play Store AVD
         run: |
           echo "no" | avdmanager create avd \
-            -n ultraandroid \
-            -k "system-images;android-35;google_apis_playstore;x86_64" \
-            -d pixel_6
+            --force \
+            --name "${AVD_NAME}" \
+            --package "system-images;android-${API_LEVEL};${TARGET};${ARCH}" \
+            --device "pixel_6"
 
-      ####################################################################
-      # CUSTOM EMULATOR SETTINGS
-      ####################################################################
-
-      - name: Emulator config
+      - name: Configure emulator
         run: |
-          EMU_CONFIG=~/.android/avd/ultraandroid.avd/config.ini
+          CONFIG="$HOME/.android/avd/${AVD_NAME}.avd/config.ini"
 
-          echo "hw.ramSize=4096" >> $EMU_CONFIG
-          echo "vm.heapSize=512" >> $EMU_CONFIG
-          echo "disk.dataPartition.size=8G" >> $EMU_CONFIG
-          echo "hw.gpu.enabled=yes" >> $EMU_CONFIG
-          echo "hw.gpu.mode=swiftshader_indirect" >> $EMU_CONFIG
-          echo "hw.keyboard=yes" >> $EMU_CONFIG
-          echo "showDeviceFrame=no" >> $EMU_CONFIG
-          echo "skin.dynamic=yes" >> $EMU_CONFIG
-          echo "hw.audioInput=no" >> $EMU_CONFIG
-          echo "hw.audioOutput=no" >> $EMU_CONFIG
-          echo "fastboot.forceColdBoot=yes" >> $EMU_CONFIG
+          sed -i '/hw.ramSize/d' "$CONFIG" || true
+          sed -i '/vm.heapSize/d' "$CONFIG" || true
+          sed -i '/disk.dataPartition.size/d' "$CONFIG" || true
+          sed -i '/hw.gpu.enabled/d' "$CONFIG" || true
+          sed -i '/hw.gpu.mode/d' "$CONFIG" || true
 
-          cat $EMU_CONFIG
+          cat >> "$CONFIG" <<EOF
+          hw.ramSize=4096
+          vm.heapSize=512
+          disk.dataPartition.size=8192M
+          hw.gpu.enabled=yes
+          hw.gpu.mode=swiftshader_indirect
+          hw.keyboard=yes
+          hw.audioInput=no
+          hw.audioOutput=no
+          showDeviceFrame=no
+          fastboot.forceColdBoot=yes
+          EOF
 
-      ####################################################################
-      # TAILSCALE
-      ####################################################################
+          cat "$CONFIG"
 
       - name: Install Tailscale
         run: |
@@ -193,17 +115,12 @@ jobs:
             --hostname=ultra-android-cloud \
             --accept-dns=false
 
-          echo "TAILSCALE IP:"
           tailscale ip -4
 
-      ####################################################################
-      # START EMULATOR
-      ####################################################################
-
-      - name: Start Android Emulator
+      - name: Start Android emulator
         run: |
           nohup emulator \
-            -avd ultraandroid \
+            -avd "${AVD_NAME}" \
             -no-window \
             -gpu swiftshader_indirect \
             -memory 4096 \
@@ -211,216 +128,87 @@ jobs:
             -accel on \
             -netdelay none \
             -netspeed full \
-            -camera-back none \
-            -camera-front none \
+            -no-snapshot \
             -noaudio \
             -no-boot-anim \
+            -camera-back none \
+            -camera-front none \
             -timezone Africa/Casablanca \
             > emulator.log 2>&1 &
-
-      ####################################################################
-      # WAIT FOR BOOT
-      ####################################################################
 
       - name: Wait for Android boot
         run: |
           adb wait-for-device
 
-          echo "Waiting for sys.boot_completed..."
-
           for i in {1..120}; do
-            BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
-
+            BOOT="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
             if [ "$BOOT" = "1" ]; then
-              echo "ANDROID BOOTED"
-              break
+              echo "Android boot completed"
+              exit 0
             fi
-
+            echo "Waiting for boot... $i"
             sleep 5
           done
 
-      ####################################################################
-      # ROOT CHECK
-      ####################################################################
+          echo "Boot failed"
+          tail -200 emulator.log || true
+          exit 1
 
-      - name: Root check
-        run: |
-          adb root || true
-          adb shell whoami || true
-
-      ####################################################################
-      # DEVICE INFO
-      ####################################################################
-
-      - name: Android info
-        run: |
-          adb shell getprop ro.build.version.release
-          adb shell getprop ro.product.model
-          adb shell getprop ro.product.manufacturer
-          adb shell getprop ro.hardware
-
-      ####################################################################
-      # PERFORMANCE TWEAKS
-      ####################################################################
-
-      - name: Android optimization
+      - name: Android performance tweaks
         run: |
           adb shell settings put global window_animation_scale 0
           adb shell settings put global transition_animation_scale 0
           adb shell settings put global animator_duration_scale 0
-
           adb shell settings put global stay_on_while_plugged_in 3
-
           adb shell settings put system screen_off_timeout 2147483647
-
-          adb shell settings put global wifi_scan_always_enabled 0
-
-          adb shell settings put global mobile_data_always_on 0
-
+          adb shell settings put global wifi_scan_always_enabled 0 || true
           adb shell settings put global adaptive_battery_management_enabled 0 || true
-
           adb shell settings put global app_standby_enabled 0 || true
-
           adb shell settings put secure screensaver_enabled 0 || true
-
-          adb shell settings put secure lock_screen_allow_private_notifications 1 || true
-
-          adb shell wm density 480
           adb shell wm size 1080x1920
+          adb shell wm density 480
 
-      ####################################################################
-      # GPU TWEAKS
-      ####################################################################
-
-      - name: GPU tweaks
+      - name: Verify Play Store and Google services
         run: |
-          adb shell settings put global enable_gpu_debug_layers 0 || true
-          adb shell setprop debug.hwui.renderer skiagl || true
-          adb shell setprop debug.renderengine.backend skiagl || true
+          echo "Android version:"
+          adb shell getprop ro.build.version.release
 
-      ####################################################################
-      # PLAY STORE CHECK
-      ####################################################################
+          echo "Model:"
+          adb shell getprop ro.product.model
 
-      - name: Verify Play Store
+          echo "Checking Play Store:"
+          adb shell pm list packages | grep "com.android.vending"
+
+          echo "Checking Google Play Services:"
+          adb shell pm list packages | grep "com.google.android.gms"
+
+      - name: Enable ADB TCP
         run: |
-          echo "PLAY STORE PACKAGES"
-
-          adb shell pm list packages | grep vending || true
-          adb shell pm list packages | grep google || true
-          adb shell pm list packages | grep gms || true
-
-      ####################################################################
-      # INSTALL APPS
-      ####################################################################
-
-      - name: Install helper apps
-        run: |
-          echo "Installing helper tools"
-
-          wget -O chrome.apk \
-            https://dl.google.com/chrome/android/apk/chrome.apk || true
-
-      ####################################################################
-      # DEVELOPER OPTIONS
-      ####################################################################
-
-      - name: Enable developer settings
-        run: |
-          adb shell settings put global development_settings_enabled 1
-          adb shell settings put global adb_enabled 1
-
-      ####################################################################
-      # SCREEN SETTINGS
-      ####################################################################
-
-      - name: Screen tuning
-        run: |
-          adb shell settings put system screen_brightness 255 || true
-          adb shell settings put system accelerometer_rotation 0 || true
-
-      ####################################################################
-      # INPUT SPEED
-      ####################################################################
-
-      - name: Input optimization
-        run: |
-          adb shell settings put secure long_press_timeout 250 || true
-          adb shell settings put secure multi_press_timeout 250 || true
-
-      ####################################################################
-      # NETWORK SPEED
-      ####################################################################
-
-      - name: Emulator network optimization
-        run: |
-          adb shell svc wifi enable || true
-          adb shell svc data enable || true
-
-      ####################################################################
-      # OPEN PORTS
-      ####################################################################
-
-      - name: Open ADB TCP
-        run: |
-          adb tcpip 5555 || true
-
-      ####################################################################
-      # SHOW CONNECTION INFO
-      ####################################################################
+          adb tcpip 5555
+          sleep 3
 
       - name: Show connection info
         run: |
-          echo "======================================"
-          echo "ANDROID CLOUD ONLINE"
-          echo "======================================"
+          IP="$(tailscale ip -4)"
 
-          echo "TAILSCALE IP:"
-          tailscale ip -4
+          echo "=========================================="
+          echo "ANDROID CLOUD IS ONLINE"
+          echo "=========================================="
+          echo "Tailscale IP: $IP"
+          echo "ADB command:"
+          echo "adb connect $IP:5555"
+          echo "=========================================="
 
-          echo ""
-          echo "ADB COMMAND:"
-          echo "adb connect $(tailscale ip -4):5555"
-
-          echo ""
-          echo "ANDROID VERSION:"
-          adb shell getprop ro.build.version.release
-
-          echo ""
-          echo "MODEL:"
-          adb shell getprop ro.product.model
-
-          echo "======================================"
-
-      ####################################################################
-      # EMULATOR LOGS
-      ####################################################################
-
-      - name: Emulator logs
+      - name: Keep alive
         run: |
-          tail -100 emulator.log || true
-
-      ####################################################################
-      # KEEP ALIVE
-      ####################################################################
-
-      - name: Keep online
-        run: |
-          echo "ANDROID SYSTEM RUNNING"
-
-          while true
-          do
-            echo "==========================="
+          while true; do
+            echo "=========================================="
             date
-            echo "==========================="
-
             adb devices || true
-
-            free -h || true
-
-            df -h || true
-
+            adb shell getprop sys.boot_completed || true
             tailscale status || true
-
+            free -h || true
+            df -h || true
+            echo "=========================================="
             sleep 300
           done
