@@ -1,118 +1,426 @@
-name: SysCore Diagnostics V2
+name: ultra-full-android-cloud-playstore-edition
+
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '*/15 * * * *'
-concurrency:
-  group: sys-diag
-  cancel-in-progress: false
+
+env:
+  ADB_INSTALL_TIMEOUT: 30
+  ANDROID_SERIAL: emulator-5554
 
 jobs:
-  diagnostics:
-    runs-on: windows-latest
-    timeout-minutes: 52560
-    
+  ultra-android:
+    name: Ultra Android Cloud
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
     steps:
-      - name: Checkout
+
+      ####################################################################
+      # CHECKOUT
+      ####################################################################
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: 1. Bypass & Obfuscation Init
-        run: |
-          # Clear event logs gracefully without throwing exit codes if access is denied
-          wevtutil el | Foreach-Object { try { wevtutil cl "$_" 2>$null } catch {} }
-          
-          # Disable Windows Defender & Telemetry
-          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
-          New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection" -Name "AllowTelemetry" -Value 0 -PropertyType DWord -Force -ErrorAction SilentlyContinue
-          
-          # Dynamic Hostname spoofing
-          $randName = -join ((65..90) + (97..122) | Get-Random -Count 8 | % {[char]$_})
-          Rename-Computer -NewName "Sys-$randName" -Force -PassThru -ErrorAction SilentlyContinue
-        continue-on-error: true
+      ####################################################################
+      # BASIC PACKAGES
+      ####################################################################
 
-      - name: 2. Core RDP & Extreme Tweaks (Smooth No Bloat)
+      - name: Install dependencies
         run: |
-          # Setup credentials
-          net user runneradmin "Win@Cloud2026"
-          
-          # Force Enable RDP & Firewall
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
-          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          
-          # Extreme Performance Tweaks (Disable all animations)
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -ErrorAction SilentlyContinue
-          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x03,0x80)) -ErrorAction SilentlyContinue
-          
-          # Set High Performance Power Plan
-          powercfg -setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
-          powercfg /change standby-timeout-ac 0
-          powercfg /h off
-          
-          # FIX: Ensure the Personalization registry path exists before setting NoLockScreen
-          $regPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
-          if (-not (Test-Path $regPath)) {
-              New-Item -Path $regPath -Force | Out-Null
-          }
-          Set-ItemProperty -Path $regPath -Name "NoLockScreen" -Value 1 -Force
-          
-          # Stop heavy bloatware services
-          Stop-Service -Name "DiagTrack" -Force -ErrorAction SilentlyContinue
-          Set-Service -Name "DiagTrack" -StartupType Disabled -ErrorAction SilentlyContinue
-          Stop-Service -Name "wuauserv" -Force -ErrorAction SilentlyContinue
+          sudo apt update
 
-      - name: 3. Persistent Data Cache (Never Lose Data)
-        uses: actions/cache@v4
+          sudo apt install -y \
+            adb \
+            curl \
+            wget \
+            unzip \
+            zip \
+            jq \
+            git \
+            net-tools \
+            iproute2 \
+            software-properties-common \
+            qemu-kvm \
+            qemu-utils \
+            bridge-utils \
+            cpu-checker \
+            docker.io \
+            ca-certificates \
+            lsb-release \
+            gnupg \
+            screen \
+            tmux \
+            htop \
+            nano \
+            xvfb
+
+      ####################################################################
+      # SYSTEM INFO
+      ####################################################################
+
+      - name: System info
+        run: |
+          echo "========================"
+          echo "CPU INFO"
+          echo "========================"
+          lscpu || true
+
+          echo "========================"
+          echo "RAM INFO"
+          echo "========================"
+          free -h || true
+
+          echo "========================"
+          echo "DISK INFO"
+          echo "========================"
+          df -h || true
+
+      ####################################################################
+      # NETWORK TWEAKS
+      ####################################################################
+
+      - name: Network tuning
+        run: |
+          sudo sysctl -w net.core.rmem_max=2500000
+          sudo sysctl -w net.core.wmem_max=2500000
+          sudo sysctl -w net.core.netdev_max_backlog=5000
+
+          sudo sysctl -w net.ipv4.tcp_rmem="4096 87380 2500000"
+          sudo sysctl -w net.ipv4.tcp_wmem="4096 65536 2500000"
+
+          sudo sysctl -w net.ipv4.tcp_fastopen=3 || true
+          sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0 || true
+          sudo sysctl -w net.ipv4.tcp_window_scaling=1 || true
+          sudo sysctl -w net.ipv4.tcp_mtu_probing=1 || true
+
+          sudo sysctl -w net.ipv4.tcp_congestion_control=bbr || true
+
+          echo "network optimized"
+
+      ####################################################################
+      # KVM
+      ####################################################################
+
+      - name: Enable KVM
+        run: |
+          sudo chmod 666 /dev/kvm || true
+          ls -la /dev/kvm || true
+
+      ####################################################################
+      # JAVA
+      ####################################################################
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
         with:
-          path: C:\SavedData
-          key: sys-data-${{ github.run_id }}
-          restore-keys: |
-            sys-data-
+          distribution: temurin
+          java-version: 17
 
-      - name: 4. Secure Tunnel Configuration
+      ####################################################################
+      # ANDROID SDK
+      ####################################################################
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      ####################################################################
+      # ACCEPT LICENSES
+      ####################################################################
+
+      - name: Accept Android licenses
         run: |
-          # Create persistent folder and desktop shortcut
-          if (-not (Test-Path "C:\SavedData")) {
-              New-Item -Path "C:\SavedData" -ItemType Directory -Force | Out-Null
-          }
-          $WshShell = New-Object -comObject WScript.Shell
-          $Shortcut = $WshShell.CreateShortcut("C:\Users\runneradmin\Desktop\SavedData.lnk")
-          $Shortcut.TargetPath = "C:\SavedData"
-          $Shortcut.Save()
+          yes | sdkmanager --licenses || true
 
-          # Download and install Tailscale
-          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "ts.exe"
-          Start-Process "ts.exe" -ArgumentList "/quiet" -Wait
-          Start-Sleep -Seconds 5
-          
-          # Static hostname for persistent IP
-          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="${{ secrets.TS_AUTH_KEY }}" --hostname="WinCloud-Static" --unattended --accept-dns=false
+      ####################################################################
+      # INSTALL SDK PACKAGES
+      ####################################################################
 
-      - name: 5. Anti-Ban Repo Keepalive
+      - name: Install Android packages
         run: |
-          echo $(Get-Date) > .sysping
-          git config --global user.name "SysBot"
-          git config --global user.email "sys@noreply.github.com"
-          git add .sysping
-          git commit -m "sys ping [skip ci]" || echo "skip"
-          git push || echo "skip"
-        continue-on-error: true
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "emulator" \
+            "system-images;android-35;google_apis_playstore;x86_64"
 
-      - name: 6. Ghost Execution Loop
+      ####################################################################
+      # CREATE AVD
+      ####################################################################
+
+      - name: Create emulator
         run: |
-          $TS_IP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          Write-Host "=========================================="
-          Write-Host " NATIVE WINDOWS V2: GHOST MODE READY      "
-          Write-Host "=========================================="
-          Write-Host " IP:       $TS_IP"
-          Write-Host " User:     runneradmin"
-          Write-Host " Password: Win@Cloud2026"
-          Write-Host "=========================================="
-          Write-Host "Running stealth sequence. System will hand off seamlessly at the 5.8 hr mark..."
-          
-          # 5 hour and 45 minute seamless hand-off loop
-          $endTime = (Get-Date).AddMinutes(345) 
-          while ((Get-Date) -lt $endTime) {
-            Start-Sleep -Seconds 600
-            Write-Output "Pulse check... System stable."
-          }
-          Write-Host "Cycle complete. Transferring to queue..."
+          echo "no" | avdmanager create avd \
+            -n ultraandroid \
+            -k "system-images;android-35;google_apis_playstore;x86_64" \
+            -d pixel_6
+
+      ####################################################################
+      # CUSTOM EMULATOR SETTINGS
+      ####################################################################
+
+      - name: Emulator config
+        run: |
+          EMU_CONFIG=~/.android/avd/ultraandroid.avd/config.ini
+
+          echo "hw.ramSize=4096" >> $EMU_CONFIG
+          echo "vm.heapSize=512" >> $EMU_CONFIG
+          echo "disk.dataPartition.size=8G" >> $EMU_CONFIG
+          echo "hw.gpu.enabled=yes" >> $EMU_CONFIG
+          echo "hw.gpu.mode=swiftshader_indirect" >> $EMU_CONFIG
+          echo "hw.keyboard=yes" >> $EMU_CONFIG
+          echo "showDeviceFrame=no" >> $EMU_CONFIG
+          echo "skin.dynamic=yes" >> $EMU_CONFIG
+          echo "hw.audioInput=no" >> $EMU_CONFIG
+          echo "hw.audioOutput=no" >> $EMU_CONFIG
+          echo "fastboot.forceColdBoot=yes" >> $EMU_CONFIG
+
+          cat $EMU_CONFIG
+
+      ####################################################################
+      # TAILSCALE
+      ####################################################################
+
+      - name: Install Tailscale
+        run: |
+          curl -fsSL https://tailscale.com/install.sh | sh
+
+      - name: Connect Tailscale
+        run: |
+          sudo tailscale up \
+            --authkey="${{ secrets.TS_KEY }}" \
+            --hostname=ultra-android-cloud \
+            --accept-dns=false
+
+          echo "TAILSCALE IP:"
+          tailscale ip -4
+
+      ####################################################################
+      # START EMULATOR
+      ####################################################################
+
+      - name: Start Android Emulator
+        run: |
+          nohup emulator \
+            -avd ultraandroid \
+            -no-window \
+            -gpu swiftshader_indirect \
+            -memory 4096 \
+            -cores 4 \
+            -accel on \
+            -netdelay none \
+            -netspeed full \
+            -camera-back none \
+            -camera-front none \
+            -noaudio \
+            -no-boot-anim \
+            -timezone Africa/Casablanca \
+            > emulator.log 2>&1 &
+
+      ####################################################################
+      # WAIT FOR BOOT
+      ####################################################################
+
+      - name: Wait for Android boot
+        run: |
+          adb wait-for-device
+
+          echo "Waiting for sys.boot_completed..."
+
+          for i in {1..120}; do
+            BOOT=$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')
+
+            if [ "$BOOT" = "1" ]; then
+              echo "ANDROID BOOTED"
+              break
+            fi
+
+            sleep 5
+          done
+
+      ####################################################################
+      # ROOT CHECK
+      ####################################################################
+
+      - name: Root check
+        run: |
+          adb root || true
+          adb shell whoami || true
+
+      ####################################################################
+      # DEVICE INFO
+      ####################################################################
+
+      - name: Android info
+        run: |
+          adb shell getprop ro.build.version.release
+          adb shell getprop ro.product.model
+          adb shell getprop ro.product.manufacturer
+          adb shell getprop ro.hardware
+
+      ####################################################################
+      # PERFORMANCE TWEAKS
+      ####################################################################
+
+      - name: Android optimization
+        run: |
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+
+          adb shell settings put global stay_on_while_plugged_in 3
+
+          adb shell settings put system screen_off_timeout 2147483647
+
+          adb shell settings put global wifi_scan_always_enabled 0
+
+          adb shell settings put global mobile_data_always_on 0
+
+          adb shell settings put global adaptive_battery_management_enabled 0 || true
+
+          adb shell settings put global app_standby_enabled 0 || true
+
+          adb shell settings put secure screensaver_enabled 0 || true
+
+          adb shell settings put secure lock_screen_allow_private_notifications 1 || true
+
+          adb shell wm density 480
+          adb shell wm size 1080x1920
+
+      ####################################################################
+      # GPU TWEAKS
+      ####################################################################
+
+      - name: GPU tweaks
+        run: |
+          adb shell settings put global enable_gpu_debug_layers 0 || true
+          adb shell setprop debug.hwui.renderer skiagl || true
+          adb shell setprop debug.renderengine.backend skiagl || true
+
+      ####################################################################
+      # PLAY STORE CHECK
+      ####################################################################
+
+      - name: Verify Play Store
+        run: |
+          echo "PLAY STORE PACKAGES"
+
+          adb shell pm list packages | grep vending || true
+          adb shell pm list packages | grep google || true
+          adb shell pm list packages | grep gms || true
+
+      ####################################################################
+      # INSTALL APPS
+      ####################################################################
+
+      - name: Install helper apps
+        run: |
+          echo "Installing helper tools"
+
+          wget -O chrome.apk \
+            https://dl.google.com/chrome/android/apk/chrome.apk || true
+
+      ####################################################################
+      # DEVELOPER OPTIONS
+      ####################################################################
+
+      - name: Enable developer settings
+        run: |
+          adb shell settings put global development_settings_enabled 1
+          adb shell settings put global adb_enabled 1
+
+      ####################################################################
+      # SCREEN SETTINGS
+      ####################################################################
+
+      - name: Screen tuning
+        run: |
+          adb shell settings put system screen_brightness 255 || true
+          adb shell settings put system accelerometer_rotation 0 || true
+
+      ####################################################################
+      # INPUT SPEED
+      ####################################################################
+
+      - name: Input optimization
+        run: |
+          adb shell settings put secure long_press_timeout 250 || true
+          adb shell settings put secure multi_press_timeout 250 || true
+
+      ####################################################################
+      # NETWORK SPEED
+      ####################################################################
+
+      - name: Emulator network optimization
+        run: |
+          adb shell svc wifi enable || true
+          adb shell svc data enable || true
+
+      ####################################################################
+      # OPEN PORTS
+      ####################################################################
+
+      - name: Open ADB TCP
+        run: |
+          adb tcpip 5555 || true
+
+      ####################################################################
+      # SHOW CONNECTION INFO
+      ####################################################################
+
+      - name: Show connection info
+        run: |
+          echo "======================================"
+          echo "ANDROID CLOUD ONLINE"
+          echo "======================================"
+
+          echo "TAILSCALE IP:"
+          tailscale ip -4
+
+          echo ""
+          echo "ADB COMMAND:"
+          echo "adb connect $(tailscale ip -4):5555"
+
+          echo ""
+          echo "ANDROID VERSION:"
+          adb shell getprop ro.build.version.release
+
+          echo ""
+          echo "MODEL:"
+          adb shell getprop ro.product.model
+
+          echo "======================================"
+
+      ####################################################################
+      # EMULATOR LOGS
+      ####################################################################
+
+      - name: Emulator logs
+        run: |
+          tail -100 emulator.log || true
+
+      ####################################################################
+      # KEEP ALIVE
+      ####################################################################
+
+      - name: Keep online
+        run: |
+          echo "ANDROID SYSTEM RUNNING"
+
+          while true
+          do
+            echo "==========================="
+            date
+            echo "==========================="
+
+            adb devices || true
+
+            free -h || true
+
+            df -h || true
+
+            tailscale status || true
+
+            sleep 300
+          done
