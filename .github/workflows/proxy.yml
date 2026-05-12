@@ -37,22 +37,12 @@ jobs:
           ls -la /dev/kvm || true
           kvm-ok || true
 
-      - name: System info
-        run: |
-          lscpu || true
-          free -h || true
-          df -h || true
-
       - name: Network optimization
         run: |
           sudo sysctl -w net.core.rmem_max=2500000 || true
           sudo sysctl -w net.core.wmem_max=2500000 || true
           sudo sysctl -w net.core.netdev_max_backlog=5000 || true
-          sudo sysctl -w net.ipv4.tcp_rmem="4096 87380 2500000" || true
-          sudo sysctl -w net.ipv4.tcp_wmem="4096 65536 2500000" || true
           sudo sysctl -w net.ipv4.tcp_fastopen=3 || true
-          sudo sysctl -w net.ipv4.tcp_slow_start_after_idle=0 || true
-          sudo sysctl -w net.ipv4.tcp_mtu_probing=1 || true
           sudo sysctl -w net.ipv4.tcp_congestion_control=bbr || true
 
       - name: Setup Java
@@ -63,6 +53,14 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Fix Android PATH
+        run: |
+          echo "$ANDROID_HOME/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/emulator" >> $GITHUB_PATH
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          ls -la "$ANDROID_HOME/emulator" || true
+          ls -la "$ANDROID_HOME/platform-tools" || true
 
       - name: Accept Android licenses
         run: |
@@ -77,6 +75,12 @@ jobs:
             "build-tools;35.0.0" \
             "system-images;android-${API_LEVEL};${TARGET};${ARCH}"
 
+      - name: Verify emulator binary
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          which emulator || true
+          "$ANDROID_HOME/emulator/emulator" -version
+
       - name: Create Play Store AVD
         run: |
           echo "no" | avdmanager create avd \
@@ -87,29 +91,15 @@ jobs:
 
       - name: Configure emulator safely
         run: |
-          echo "Searching AVD config..."
-
           CONFIG="$(find "$HOME" -type f -path "*${AVD_NAME}.avd/config.ini" | head -n 1)"
 
           if [ -z "$CONFIG" ]; then
             echo "AVD config not found"
-            echo "Listing possible AVD folders:"
             find "$HOME" -maxdepth 8 -type d | grep -i avd || true
             exit 1
           fi
 
           echo "Found config: $CONFIG"
-
-          sed -i '/^hw.ramSize=/d' "$CONFIG" || true
-          sed -i '/^vm.heapSize=/d' "$CONFIG" || true
-          sed -i '/^disk.dataPartition.size=/d' "$CONFIG" || true
-          sed -i '/^hw.gpu.enabled=/d' "$CONFIG" || true
-          sed -i '/^hw.gpu.mode=/d' "$CONFIG" || true
-          sed -i '/^hw.keyboard=/d' "$CONFIG" || true
-          sed -i '/^hw.audioInput=/d' "$CONFIG" || true
-          sed -i '/^hw.audioOutput=/d' "$CONFIG" || true
-          sed -i '/^showDeviceFrame=/d' "$CONFIG" || true
-          sed -i '/^fastboot.forceColdBoot=/d' "$CONFIG" || true
 
           {
             echo "hw.ramSize=4096"
@@ -137,12 +127,11 @@ jobs:
             --hostname=ultra-android-cloud \
             --accept-dns=false
 
-          echo "Tailscale IP:"
           tailscale ip -4
 
       - name: Start Android emulator
         run: |
-          nohup emulator \
+          nohup "$ANDROID_HOME/emulator/emulator" \
             -avd "${AVD_NAME}" \
             -no-window \
             -gpu swiftshader_indirect \
@@ -159,14 +148,14 @@ jobs:
             -timezone Africa/Casablanca \
             > emulator.log 2>&1 &
 
-          sleep 10
-          tail -80 emulator.log || true
+          sleep 15
+          tail -120 emulator.log || true
 
       - name: Wait for Android boot
         run: |
           adb wait-for-device
 
-          for i in {1..150}; do
+          for i in {1..180}; do
             BOOT="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
 
             if [ "$BOOT" = "1" ]; then
@@ -187,78 +176,24 @@ jobs:
           adb shell input keyevent 82 || true
           adb shell input keyevent 3 || true
 
-      - name: Android base info
-        run: |
-          echo "Android version:"
-          adb shell getprop ro.build.version.release || true
-
-          echo "Model:"
-          adb shell getprop ro.product.model || true
-
-          echo "Manufacturer:"
-          adb shell getprop ro.product.manufacturer || true
-
-          echo "CPU ABI:"
-          adb shell getprop ro.product.cpu.abi || true
-
-          echo "Boot completed:"
-          adb shell getprop sys.boot_completed || true
-
       - name: Android performance tweaks
         run: |
           adb shell settings put global window_animation_scale 0 || true
           adb shell settings put global transition_animation_scale 0 || true
           adb shell settings put global animator_duration_scale 0 || true
-
           adb shell settings put global stay_on_while_plugged_in 3 || true
           adb shell settings put system screen_off_timeout 2147483647 || true
-
           adb shell settings put global wifi_scan_always_enabled 0 || true
           adb shell settings put global adaptive_battery_management_enabled 0 || true
           adb shell settings put global app_standby_enabled 0 || true
-          adb shell settings put global app_auto_restriction_enabled 0 || true
-
-          adb shell settings put secure screensaver_enabled 0 || true
-          adb shell settings put secure lock_screen_locking_enabled 0 || true
-
           adb shell wm size 1080x1920 || true
           adb shell wm density 480 || true
 
-      - name: Android network tweaks
-        run: |
-          adb shell svc wifi enable || true
-          adb shell svc data enable || true
-          adb shell settings put global airplane_mode_on 0 || true
-          adb shell settings put global captive_portal_mode 0 || true
-          adb shell settings put global private_dns_mode off || true
-
-      - name: Android GPU tweaks
-        run: |
-          adb shell settings put global enable_gpu_debug_layers 0 || true
-          adb shell setprop debug.hwui.renderer skiagl || true
-          adb shell setprop debug.renderengine.backend skiagl || true
-          adb shell setprop debug.hwui.disable_vsync false || true
-
-      - name: Developer options
-        run: |
-          adb shell settings put global development_settings_enabled 1 || true
-          adb shell settings put global adb_enabled 1 || true
-          adb shell settings put global verifier_verify_adb_installs 0 || true
-          adb shell settings put global package_verifier_enable 0 || true
-
       - name: Verify Play Store and Google services
         run: |
-          echo "Checking Play Store..."
           adb shell pm list packages | grep "com.android.vending"
-
-          echo "Checking Google Play Services..."
           adb shell pm list packages | grep "com.google.android.gms"
-
-          echo "Checking Google framework..."
           adb shell pm list packages | grep "com.google.android.gsf" || true
-
-          echo "All Google packages:"
-          adb shell pm list packages | grep google || true
 
       - name: Start Play Store once
         run: |
@@ -277,33 +212,19 @@ jobs:
 
           echo "=========================================="
           echo "ANDROID CLOUD IS ONLINE"
-          echo "=========================================="
           echo "Tailscale IP: $IP"
-          echo ""
-          echo "Connect from your phone or PC:"
+          echo "ADB command:"
           echo "adb connect $IP:5555"
-          echo ""
-          echo "Then check:"
-          echo "adb devices"
           echo "=========================================="
 
       - name: Keep Android alive
         run: |
           while true; do
-            echo "=========================================="
             date
-            echo "ADB:"
             adb devices || true
-            echo "Boot:"
             adb shell getprop sys.boot_completed || true
-            echo "Android:"
-            adb shell getprop ro.build.version.release || true
-            echo "Tailscale:"
             tailscale status || true
-            echo "RAM:"
             free -h || true
-            echo "DISK:"
             df -h || true
-            echo "=========================================="
             sleep 300
           done
