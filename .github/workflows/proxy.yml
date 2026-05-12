@@ -33,11 +33,17 @@ jobs:
 
       - name: Enable KVM
         run: |
-          sudo chmod 666 /dev/kvm
-          ls -la /dev/kvm
+          sudo chmod 666 /dev/kvm || true
+          ls -la /dev/kvm || true
           kvm-ok || true
 
-      - name: System network optimization
+      - name: System info
+        run: |
+          lscpu || true
+          free -h || true
+          df -h || true
+
+      - name: Network optimization
         run: |
           sudo sysctl -w net.core.rmem_max=2500000 || true
           sudo sysctl -w net.core.wmem_max=2500000 || true
@@ -79,28 +85,44 @@ jobs:
             --package "system-images;android-${API_LEVEL};${TARGET};${ARCH}" \
             --device "pixel_6"
 
-      - name: Configure emulator
+      - name: Configure emulator safely
         run: |
-          CONFIG="$HOME/.android/avd/${AVD_NAME}.avd/config.ini"
+          echo "Searching AVD config..."
 
-          sed -i '/hw.ramSize/d' "$CONFIG" || true
-          sed -i '/vm.heapSize/d' "$CONFIG" || true
-          sed -i '/disk.dataPartition.size/d' "$CONFIG" || true
-          sed -i '/hw.gpu.enabled/d' "$CONFIG" || true
-          sed -i '/hw.gpu.mode/d' "$CONFIG" || true
+          CONFIG="$(find "$HOME" -type f -path "*${AVD_NAME}.avd/config.ini" | head -n 1)"
 
-          cat >> "$CONFIG" <<EOF
-          hw.ramSize=4096
-          vm.heapSize=512
-          disk.dataPartition.size=8192M
-          hw.gpu.enabled=yes
-          hw.gpu.mode=swiftshader_indirect
-          hw.keyboard=yes
-          hw.audioInput=no
-          hw.audioOutput=no
-          showDeviceFrame=no
-          fastboot.forceColdBoot=yes
-          EOF
+          if [ -z "$CONFIG" ]; then
+            echo "AVD config not found"
+            echo "Listing possible AVD folders:"
+            find "$HOME" -maxdepth 8 -type d | grep -i avd || true
+            exit 1
+          fi
+
+          echo "Found config: $CONFIG"
+
+          sed -i '/^hw.ramSize=/d' "$CONFIG" || true
+          sed -i '/^vm.heapSize=/d' "$CONFIG" || true
+          sed -i '/^disk.dataPartition.size=/d' "$CONFIG" || true
+          sed -i '/^hw.gpu.enabled=/d' "$CONFIG" || true
+          sed -i '/^hw.gpu.mode=/d' "$CONFIG" || true
+          sed -i '/^hw.keyboard=/d' "$CONFIG" || true
+          sed -i '/^hw.audioInput=/d' "$CONFIG" || true
+          sed -i '/^hw.audioOutput=/d' "$CONFIG" || true
+          sed -i '/^showDeviceFrame=/d' "$CONFIG" || true
+          sed -i '/^fastboot.forceColdBoot=/d' "$CONFIG" || true
+
+          {
+            echo "hw.ramSize=4096"
+            echo "vm.heapSize=512"
+            echo "disk.dataPartition.size=8192M"
+            echo "hw.gpu.enabled=yes"
+            echo "hw.gpu.mode=swiftshader_indirect"
+            echo "hw.keyboard=yes"
+            echo "hw.audioInput=no"
+            echo "hw.audioOutput=no"
+            echo "showDeviceFrame=no"
+            echo "fastboot.forceColdBoot=yes"
+          } >> "$CONFIG"
 
           cat "$CONFIG"
 
@@ -115,6 +137,7 @@ jobs:
             --hostname=ultra-android-cloud \
             --accept-dns=false
 
+          echo "Tailscale IP:"
           tailscale ip -4
 
       - name: Start Android emulator
@@ -136,56 +159,117 @@ jobs:
             -timezone Africa/Casablanca \
             > emulator.log 2>&1 &
 
+          sleep 10
+          tail -80 emulator.log || true
+
       - name: Wait for Android boot
         run: |
           adb wait-for-device
 
-          for i in {1..120}; do
+          for i in {1..150}; do
             BOOT="$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')"
+
             if [ "$BOOT" = "1" ]; then
               echo "Android boot completed"
               exit 0
             fi
-            echo "Waiting for boot... $i"
+
+            echo "Waiting for Android boot... $i"
             sleep 5
           done
 
           echo "Boot failed"
-          tail -200 emulator.log || true
+          tail -300 emulator.log || true
           exit 1
+
+      - name: Unlock screen
+        run: |
+          adb shell input keyevent 82 || true
+          adb shell input keyevent 3 || true
+
+      - name: Android base info
+        run: |
+          echo "Android version:"
+          adb shell getprop ro.build.version.release || true
+
+          echo "Model:"
+          adb shell getprop ro.product.model || true
+
+          echo "Manufacturer:"
+          adb shell getprop ro.product.manufacturer || true
+
+          echo "CPU ABI:"
+          adb shell getprop ro.product.cpu.abi || true
+
+          echo "Boot completed:"
+          adb shell getprop sys.boot_completed || true
 
       - name: Android performance tweaks
         run: |
-          adb shell settings put global window_animation_scale 0
-          adb shell settings put global transition_animation_scale 0
-          adb shell settings put global animator_duration_scale 0
-          adb shell settings put global stay_on_while_plugged_in 3
-          adb shell settings put system screen_off_timeout 2147483647
+          adb shell settings put global window_animation_scale 0 || true
+          adb shell settings put global transition_animation_scale 0 || true
+          adb shell settings put global animator_duration_scale 0 || true
+
+          adb shell settings put global stay_on_while_plugged_in 3 || true
+          adb shell settings put system screen_off_timeout 2147483647 || true
+
           adb shell settings put global wifi_scan_always_enabled 0 || true
           adb shell settings put global adaptive_battery_management_enabled 0 || true
           adb shell settings put global app_standby_enabled 0 || true
+          adb shell settings put global app_auto_restriction_enabled 0 || true
+
           adb shell settings put secure screensaver_enabled 0 || true
-          adb shell wm size 1080x1920
-          adb shell wm density 480
+          adb shell settings put secure lock_screen_locking_enabled 0 || true
+
+          adb shell wm size 1080x1920 || true
+          adb shell wm density 480 || true
+
+      - name: Android network tweaks
+        run: |
+          adb shell svc wifi enable || true
+          adb shell svc data enable || true
+          adb shell settings put global airplane_mode_on 0 || true
+          adb shell settings put global captive_portal_mode 0 || true
+          adb shell settings put global private_dns_mode off || true
+
+      - name: Android GPU tweaks
+        run: |
+          adb shell settings put global enable_gpu_debug_layers 0 || true
+          adb shell setprop debug.hwui.renderer skiagl || true
+          adb shell setprop debug.renderengine.backend skiagl || true
+          adb shell setprop debug.hwui.disable_vsync false || true
+
+      - name: Developer options
+        run: |
+          adb shell settings put global development_settings_enabled 1 || true
+          adb shell settings put global adb_enabled 1 || true
+          adb shell settings put global verifier_verify_adb_installs 0 || true
+          adb shell settings put global package_verifier_enable 0 || true
 
       - name: Verify Play Store and Google services
         run: |
-          echo "Android version:"
-          adb shell getprop ro.build.version.release
-
-          echo "Model:"
-          adb shell getprop ro.product.model
-
-          echo "Checking Play Store:"
+          echo "Checking Play Store..."
           adb shell pm list packages | grep "com.android.vending"
 
-          echo "Checking Google Play Services:"
+          echo "Checking Google Play Services..."
           adb shell pm list packages | grep "com.google.android.gms"
+
+          echo "Checking Google framework..."
+          adb shell pm list packages | grep "com.google.android.gsf" || true
+
+          echo "All Google packages:"
+          adb shell pm list packages | grep google || true
+
+      - name: Start Play Store once
+        run: |
+          adb shell monkey -p com.android.vending -c android.intent.category.LAUNCHER 1 || true
+          sleep 10
+          adb shell input keyevent 3 || true
 
       - name: Enable ADB TCP
         run: |
           adb tcpip 5555
-          sleep 3
+          sleep 5
 
       - name: Show connection info
         run: |
@@ -195,19 +279,30 @@ jobs:
           echo "ANDROID CLOUD IS ONLINE"
           echo "=========================================="
           echo "Tailscale IP: $IP"
-          echo "ADB command:"
+          echo ""
+          echo "Connect from your phone or PC:"
           echo "adb connect $IP:5555"
+          echo ""
+          echo "Then check:"
+          echo "adb devices"
           echo "=========================================="
 
-      - name: Keep alive
+      - name: Keep Android alive
         run: |
           while true; do
             echo "=========================================="
             date
+            echo "ADB:"
             adb devices || true
+            echo "Boot:"
             adb shell getprop sys.boot_completed || true
+            echo "Android:"
+            adb shell getprop ro.build.version.release || true
+            echo "Tailscale:"
             tailscale status || true
+            echo "RAM:"
             free -h || true
+            echo "DISK:"
             df -h || true
             echo "=========================================="
             sleep 300
